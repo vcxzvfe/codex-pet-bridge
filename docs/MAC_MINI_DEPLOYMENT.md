@@ -1,0 +1,95 @@
+# Mac Mini Deployment
+
+The preferred deployment is to make the Mac mini the always-on notification hub while keeping the MacBook Pro free of background daemons.
+
+## Target Layout
+
+- Mac mini runs `bridge-server.js`.
+- Mac mini runs optional adapters such as Polymarket polling.
+- MacBook Pro runs Claude Code, Codex, and other tools normally.
+- MacBook Pro hooks send events through an SSH tunnel.
+- ESP S3 / XiaoZhi reads notifications from the Mac mini.
+
+## Manual Start
+
+On the Mac mini:
+
+```bash
+cd /path/to/codex-pet-bridge
+node ./src/bridge-server.js
+```
+
+On the MacBook Pro:
+
+```bash
+ssh -N -L 17366:127.0.0.1:17366 mac-mini
+```
+
+## LaunchAgent
+
+For a lightweight always-on setup on the Mac mini, create:
+
+```text
+~/Library/LaunchAgents/com.zifan.codex-pet-bridge.plist
+```
+
+Example:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zifan.codex-pet-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>node</string>
+    <string>/path/to/codex-pet-bridge/src/bridge-server.js</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/path/to/codex-pet-bridge</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PET_BRIDGE_HOST</key>
+    <string>127.0.0.1</string>
+    <key>PET_BRIDGE_PORT</key>
+    <string>17366</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+```
+
+Load it:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.zifan.codex-pet-bridge.plist
+```
+
+Check it:
+
+```bash
+curl http://127.0.0.1:17366/health
+```
+
+## ESP S3
+
+If the ESP S3 runs on the same LAN and cannot use SSH tunneling, expose the bridge on the Mac mini LAN address with a token:
+
+```bash
+PET_BRIDGE_HOST=0.0.0.0 PET_BRIDGE_TOKEN="<random-token>" node ./src/bridge-server.js
+```
+
+Then poll:
+
+```http
+GET http://<mac-mini-lan-ip>:17366/esp32/poll?token=<random-token>
+```
+
+Use this only on a trusted LAN. Do not expose the bridge to the public internet.
