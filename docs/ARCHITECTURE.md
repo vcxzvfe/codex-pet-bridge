@@ -16,7 +16,7 @@ flowchart LR
   MCP -->|"POST /events"| Bridge
   Bridge -->|"SSE /stream"| Pet["Desktop Pet"]
   Bridge -->|"GET /esp32/poll"| ESP["ESP S3 / XiaoZhi"]
-  Bridge -->|"POST /assistant/notifications"| Rex["Rex / XiaoZhi Assistant Hub"]
+  Bridge -->|"POST /assistant/notifications"| XiaoZhi["XiaoZhi Assistant Hub"]
   Bridge -->|"webhook"| Push["Push or automation sink"]
 ```
 
@@ -44,7 +44,7 @@ Adapters should stay thin:
 
 This keeps future upstream updates local to one adapter instead of touching the notification devices.
 
-## Rex / XiaoZhi Sink
+## XiaoZhi Sink
 
 When `XIAOZHI_ASSISTANT_URL` is set, the bridge forwards normalized semantic events to the Mac mini assistant hub:
 
@@ -52,7 +52,7 @@ When `XIAOZHI_ASSISTANT_URL` is set, the bridge forwards normalized semantic eve
 POST <XIAOZHI_ASSISTANT_URL>/assistant/notifications
 ```
 
-This sink deliberately reuses the assistant hub's existing `source/task/status/message/priority/needs_user` contract. The bridge does not choose screen colors or brightness directly. The Rex backend owns visual policy, including Codex blue-purple running state, Claude orange running state, and green completion flashes.
+This sink deliberately reuses the assistant hub's existing `source/task/status/message/priority/needs_user` contract. The bridge does not choose screen colors or brightness directly. The XiaoZhi backend owns visual policy, including Codex blue-purple running state, Claude orange running state, and green completion flashes.
 
 Status mapping:
 

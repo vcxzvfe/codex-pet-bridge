@@ -94,9 +94,9 @@ GET http://<mac-mini-lan-ip>:17366/esp32/poll?token=<random-token>
 
 Use this only on a trusted LAN. Do not expose the bridge to the public internet.
 
-## Rex / XiaoZhi Assistant Hub
+## XiaoZhi Assistant Hub
 
-If the Mac mini already runs the Rex / XiaoZhi assistant hub, prefer forwarding semantic events to that service instead of having the ESP S3 poll this bridge directly:
+If the Mac mini already runs the XiaoZhi assistant hub, prefer forwarding semantic events to that service instead of having the ESP S3 poll this bridge directly:
 
 ```bash
 XIAOZHI_ASSISTANT_URL=http://127.0.0.1:8003 \
