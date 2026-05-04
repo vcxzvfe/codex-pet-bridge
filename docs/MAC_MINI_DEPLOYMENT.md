@@ -93,3 +93,31 @@ GET http://<mac-mini-lan-ip>:17366/esp32/poll?token=<random-token>
 ```
 
 Use this only on a trusted LAN. Do not expose the bridge to the public internet.
+
+## Rex / XiaoZhi Assistant Hub
+
+If the Mac mini already runs the Rex / XiaoZhi assistant hub, prefer forwarding semantic events to that service instead of having the ESP S3 poll this bridge directly:
+
+```bash
+XIAOZHI_ASSISTANT_URL=http://127.0.0.1:8003 \
+node ./src/bridge-server.js
+```
+
+For events coming from the MacBook Pro through an SSH tunnel, add a stable device prefix:
+
+```bash
+XIAOZHI_ASSISTANT_URL=http://127.0.0.1:8003 \
+XIAOZHI_SOURCE_PREFIX=mbp \
+node ./src/bridge-server.js
+```
+
+The assistant hub receives `/assistant/notifications` payloads and drives the screen visual state. This avoids duplicating XiaoZhi screen policy in this bridge.
+
+Recommended source labels:
+
+- `mbp-codex`
+- `mini-codex`
+- `win-codex`
+- `mbp-claude`
+- `mini-claude`
+- `openclaw`

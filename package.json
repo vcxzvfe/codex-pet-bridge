@@ -1,6 +1,6 @@
 {
   "name": "codex-pet-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local bridge for routing agent events from Claude Code, Claude Desktop, and other tools into a desktop pet UI.",
   "type": "module",
   "bin": {

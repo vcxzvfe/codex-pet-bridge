@@ -59,6 +59,18 @@ Do not put API keys directly into event messages. Polymarket or other adapter cr
 
 If you enable raw payload storage with `PET_BRIDGE_STORE_RAW=1`, the bridge redacts common secret-like fields such as `token`, `secret`, `password`, `authorization`, and `api_key`, but raw storage should still be treated as sensitive.
 
+## XiaoZhi Assistant Sink
+
+`XIAOZHI_ASSISTANT_URL` should normally point at `http://127.0.0.1:8003` on the Mac mini or at a trusted LAN address. The bridge only sends normalized notification fields and does not forward raw payloads to XiaoZhi.
+
+If the assistant hub later requires authentication, set:
+
+```bash
+XIAOZHI_WEBHOOK_TOKEN="<token>"
+```
+
+The token is sent as `Authorization: Bearer <token>`. Do not put this token in Git-tracked `.env` files.
+
 ## Not Yet Implemented
 
 - Persistent encrypted notification storage

@@ -13,6 +13,7 @@ flowchart LR
   CX["Codex CLI / Desktop"] -->|"App Server/MCP/plugin adapter"| Bridge
   Bridge -->|"SSE: /stream"| Pet["Desktop Pet UI"]
   Bridge -->|"GET /esp32/poll"| ESP["ESP S3 / 小智"]
+  Bridge -->|"POST /assistant/notifications"| Rex["Rex / 小智 Assistant Hub"]
   Bridge -->|"POST webhook"| Push["Notification Sink"]
   Bridge -->|"JSONL log"| Log["events.jsonl"]
 ```
@@ -214,6 +215,53 @@ GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 ```
 
 后续如果小智那边已经有 MQTT 或 WebSocket 通道，可以只新增一个 sink adapter，把 `PetNotification` 转成对应协议；Claude/Codex 侧不用改。
+
+## Rex / 小智 Assistant Hub 接入
+
+如果 Mac mini 已经运行 Rex / 小智后端，推荐让本 bridge 直接复用它的 `/assistant/notifications`，不要再给小智单独搭一套状态服务：
+
+```bash
+XIAOZHI_ASSISTANT_URL=http://192.168.8.109:8003 \
+XIAOZHI_SOURCE_PREFIX=mbp \
+node ./src/bridge-server.js
+```
+
+bridge 会把内部状态映射成当前小智后端的稳定 payload：
+
+```json
+{
+  "source": "mbp-codex",
+  "task": "mbp-codex-active",
+  "status": "done",
+  "message": "Codex turn ended",
+  "priority": "normal",
+  "needs_user": true
+}
+```
+
+映射规则：
+
+- `thinking / working / started / running / progress / near-complete` -> `running`
+- `completed / done / success / finished` -> `done + needs_user`
+- `needs-attention / waiting-user` -> `waiting_user + needs_user`
+- `error / failed / blocked` -> `error + needs_user`
+- 通知 ack -> `clear`
+
+当前 Rex 后端会负责最终视觉策略：Codex 蓝紫运行、Claude 橙色运行、完成时绿色快速闪烁并临时拉高亮度，然后自动恢复。bridge 只负责发语义事件，不直接决定屏幕颜色。
+
+为了避免多设备互相覆盖，`source` 和 `task` 必须稳定。推荐：
+
+- MBP Codex: `source=mbp-codex`, `task=mbp-codex-active`
+- Mac mini Codex: `source=mini-codex`
+- Windows Codex: `source=win-codex`
+- MBP Claude Code: `source=mbp-claude`
+- Mac mini Claude Code: `source=mini-claude`
+
+如果小智后端未来加鉴权，可以设置：
+
+```bash
+XIAOZHI_WEBHOOK_TOKEN="<token>"
+```
 
 ## 面向未来更新的边界
 

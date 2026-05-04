@@ -16,6 +16,7 @@ flowchart LR
   MCP -->|"POST /events"| Bridge
   Bridge -->|"SSE /stream"| Pet["Desktop Pet"]
   Bridge -->|"GET /esp32/poll"| ESP["ESP S3 / XiaoZhi"]
+  Bridge -->|"POST /assistant/notifications"| Rex["Rex / XiaoZhi Assistant Hub"]
   Bridge -->|"webhook"| Push["Push or automation sink"]
 ```
 
@@ -42,3 +43,23 @@ Adapters should stay thin:
 - Avoid storing upstream secrets or full prompts unless explicitly enabled.
 
 This keeps future upstream updates local to one adapter instead of touching the notification devices.
+
+## Rex / XiaoZhi Sink
+
+When `XIAOZHI_ASSISTANT_URL` is set, the bridge forwards normalized semantic events to the Mac mini assistant hub:
+
+```text
+POST <XIAOZHI_ASSISTANT_URL>/assistant/notifications
+```
+
+This sink deliberately reuses the assistant hub's existing `source/task/status/message/priority/needs_user` contract. The bridge does not choose screen colors or brightness directly. The Rex backend owns visual policy, including Codex blue-purple running state, Claude orange running state, and green completion flashes.
+
+Status mapping:
+
+- active states become `running`
+- completed states become `done` with `needs_user=true`
+- attention states become `waiting_user` with `needs_user=true`
+- failures become `error` with `needs_user=true`
+- notification ack becomes `clear`
+
+Use stable `source + task` values so the assistant hub can maintain one active/pending state per real task.

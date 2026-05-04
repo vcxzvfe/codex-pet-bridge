@@ -1,13 +1,37 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import http from "node:http";
 
 const port = 17367;
+const xiaozhiPort = 17368;
+const xiaozhiRequests = [];
+const xiaozhiServer = http.createServer(async (req, res) => {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  xiaozhiRequests.push({
+    method: req.method,
+    url: req.url,
+    body: JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}")
+  });
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ code: 0, data: { ok: true } }));
+});
+const xiaozhiListening = once(xiaozhiServer, "listening");
+xiaozhiServer.listen(xiaozhiPort, "127.0.0.1");
+
 const server = spawn(process.execPath, ["./src/bridge-server.js"], {
-  env: { ...process.env, PET_BRIDGE_PORT: String(port), PET_BRIDGE_LOG: "./test/events.jsonl" },
+  env: {
+    ...process.env,
+    PET_BRIDGE_PORT: String(port),
+    PET_BRIDGE_LOG: "./test/events.jsonl",
+    XIAOZHI_ASSISTANT_URL: `http://127.0.0.1:${xiaozhiPort}`,
+    XIAOZHI_SOURCE_PREFIX: "mbp"
+  },
   stdio: ["ignore", "pipe", "pipe"]
 });
 
 try {
+  await xiaozhiListening;
   await waitForServer(port);
 
   const hook = spawn(process.execPath, ["./src/claude-hook.js"], {
@@ -37,9 +61,34 @@ try {
   const ackBody = await ackResponse.json();
   if (!ackBody.ok || !ackBody.notification.read) throw new Error("notification was not acknowledged");
 
+  await fetch(`http://127.0.0.1:${port}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "codex",
+      task: "mbp-codex-active",
+      status: "completed",
+      message: "Codex turn ended",
+      notify: true
+    })
+  });
+
+  await waitForXiaozhiRequests(3);
+  const [attention, clear, done] = xiaozhiRequests.map((item) => item.body);
+  if (attention.source !== "mbp-claude" || attention.status !== "waiting_user" || !attention.needs_user) {
+    throw new Error("Claude attention event was not forwarded to XiaoZhi correctly");
+  }
+  if (clear.status !== "clear" || clear.needs_user !== false) {
+    throw new Error("notification ack was not forwarded to XiaoZhi as clear");
+  }
+  if (done.source !== "mbp-codex" || done.status !== "done" || done.task !== "mbp-codex-active" || !done.needs_user) {
+    throw new Error("Codex completion event was not forwarded to XiaoZhi correctly");
+  }
+
   console.log("smoke ok");
 } finally {
   server.kill();
+  xiaozhiServer.close();
 }
 
 async function waitForServer(port) {
@@ -52,4 +101,12 @@ async function waitForServer(port) {
     }
   }
   throw new Error("server did not start");
+}
+
+async function waitForXiaozhiRequests(count) {
+  for (let index = 0; index < 30; index += 1) {
+    if (xiaozhiRequests.length >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`xiaozhi sink received ${xiaozhiRequests.length}, expected ${count}`);
 }

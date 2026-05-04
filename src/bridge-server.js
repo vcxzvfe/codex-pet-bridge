@@ -9,6 +9,9 @@ const HOST = process.env.PET_BRIDGE_HOST || "127.0.0.1";
 const LOG_PATH = resolve(process.env.PET_BRIDGE_LOG || "./events.jsonl");
 const WEBHOOK_URL = process.env.PET_WEBHOOK_URL || "";
 const WEBHOOK_TOKEN = process.env.PET_WEBHOOK_TOKEN || "";
+const XIAOZHI_ASSISTANT_URL = stripTrailingSlash(process.env.XIAOZHI_ASSISTANT_URL || "");
+const XIAOZHI_SOURCE_PREFIX = process.env.XIAOZHI_SOURCE_PREFIX || "";
+const XIAOZHI_WEBHOOK_TOKEN = process.env.XIAOZHI_WEBHOOK_TOKEN || "";
 const INBOUND_TOKEN = process.env.PET_BRIDGE_TOKEN || "";
 const MAX_EVENTS = numberFromEnv("PET_BRIDGE_MAX_EVENTS", 200);
 const MAX_NOTIFICATIONS = numberFromEnv("PET_BRIDGE_MAX_NOTIFICATIONS", 100);
@@ -137,6 +140,9 @@ server.listen(PORT, HOST, () => {
   if (NOTIFICATION_WEBHOOK_URL) {
     console.log(`notification webhook enabled: ${NOTIFICATION_WEBHOOK_URL}`);
   }
+  if (XIAOZHI_ASSISTANT_URL) {
+    console.log(`xiaozhi assistant sink enabled: ${XIAOZHI_ASSISTANT_URL}`);
+  }
 });
 
 function normalizeEvent(input = {}) {
@@ -154,6 +160,7 @@ function normalizeEvent(input = {}) {
     type,
     status,
     message,
+    task: stringValue(raw.task) || stringValue(raw.codexTask) || "",
     notify: typeof raw.notify === "boolean" ? raw.notify : undefined,
     progress: numberFromValue(raw.progress, null),
     workspace: stringValue(raw.workspace) || stringValue(raw.cwd) || "",
@@ -202,6 +209,7 @@ async function publishEvent(event) {
 
   broadcastSse(event);
   await postWebhook(event);
+  await postXiaozhiNotification(event);
 
   const notification = createNotification(event);
   if (notification) {
@@ -264,6 +272,7 @@ function createNotification(event) {
     time: event.time,
     kind: "notification",
     source: event.source,
+    task: taskForEvent(event),
     status: event.status,
     priority: priorityForStatus(event.status),
     title: titleForStatus(event.status),
@@ -276,7 +285,7 @@ function createNotification(event) {
 }
 
 function notificationKey(event) {
-  return [event.source, event.sessionId, event.workspace, event.status, event.message].join("|");
+  return [event.source, taskForEvent(event), event.sessionId, event.workspace, event.status, event.message].join("|");
 }
 
 function titleForStatus(status) {
@@ -302,6 +311,7 @@ function ackNotification(id) {
   if (!notification) return null;
   notification.read = true;
   notification.readAt = new Date().toISOString();
+  void postXiaozhiClear(notification);
   return notification;
 }
 
@@ -312,6 +322,7 @@ function ackAllNotifications() {
     if (!notification.read) {
       notification.read = true;
       notification.readAt = now;
+      void postXiaozhiClear(notification);
       count += 1;
     }
   }
@@ -328,6 +339,7 @@ function compactDeviceState() {
       ? {
           id: notification.id,
           source: notification.source,
+          task: notification.task,
           status: notification.status,
           priority: notification.priority,
           title: notification.title,
@@ -352,6 +364,105 @@ async function postWebhook(event, targetUrl = WEBHOOK_URL) {
 
   if (!response.ok) {
     console.error(`webhook failed: ${response.status} ${response.statusText}`);
+  }
+}
+
+async function postXiaozhiNotification(event) {
+  if (!XIAOZHI_ASSISTANT_URL) return;
+  const payload = xiaozhiPayloadForEvent(event);
+  if (!payload) return;
+  await safePostJson(`${XIAOZHI_ASSISTANT_URL}/assistant/notifications`, payload, xiaozhiHeaders());
+}
+
+async function postXiaozhiClear(notification) {
+  if (!XIAOZHI_ASSISTANT_URL) return;
+  const payload = {
+    source: xiaozhiSourceFor(notification),
+    task: notification.task || taskForEvent(notification),
+    status: "clear",
+    message: "Notification acknowledged",
+    priority: priorityName(notification.priority),
+    needs_user: false
+  };
+  await safePostJson(`${XIAOZHI_ASSISTANT_URL}/assistant/notifications`, payload, xiaozhiHeaders());
+}
+
+function xiaozhiPayloadForEvent(event) {
+  const status = xiaozhiStatusFor(event.status);
+  if (!status) return null;
+  if (event.notify === false && status !== "running" && status !== "clear") return null;
+  const needsUser = event.notify !== false && (
+    event.notify === true || ["done", "error", "waiting_user", "blocked"].includes(status)
+  );
+  return {
+    source: xiaozhiSourceFor(event),
+    task: taskForEvent(event),
+    status,
+    message: event.message || titleForStatus(event.status),
+    priority: priorityName(priorityForStatus(event.status)),
+    needs_user: needsUser
+  };
+}
+
+function xiaozhiStatusFor(status) {
+  if (["thinking", "working", "started", "running", "progress", "near-complete"].includes(status)) return "running";
+  if (["completed", "complete", "done", "success", "succeeded", "finished"].includes(status)) return "done";
+  if (["needs-attention", "waiting", "waiting-user", "waiting_user"].includes(status)) return "waiting_user";
+  if (["error", "failed", "fail", "blocked"].includes(status)) return "error";
+  if (["idle", "clear", "ack", "dismissed"].includes(status)) return "clear";
+  return null;
+}
+
+function xiaozhiSourceFor(event) {
+  const family = sourceFamily(event.source);
+  const prefix = XIAOZHI_SOURCE_PREFIX.trim().toLowerCase();
+  return prefix && family ? `${prefix}-${family}` : event.source || "pet-bridge";
+}
+
+function sourceFamily(source) {
+  const text = String(source || "").toLowerCase();
+  if (text.includes("claude")) return "claude";
+  if (text.includes("codex")) return "codex";
+  if (text.includes("openclaw")) return "openclaw";
+  return "";
+}
+
+function taskForEvent(event) {
+  return event.task || event.sessionId || slugFromPath(event.workspace) || "agent-task";
+}
+
+function slugFromPath(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.split(/[\\/]/).filter(Boolean).at(-1) || "";
+}
+
+function priorityName(priority) {
+  if (typeof priority === "string") return priority;
+  if (priority >= 3) return "urgent";
+  if (priority === 2) return "high";
+  return "normal";
+}
+
+function xiaozhiHeaders() {
+  const headers = { "content-type": "application/json" };
+  if (XIAOZHI_WEBHOOK_TOKEN) headers.authorization = `Bearer ${XIAOZHI_WEBHOOK_TOKEN}`;
+  return headers;
+}
+
+async function safePostJson(targetUrl, payload, headers) {
+  try {
+    const response = await fetch(targetUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(numberFromEnv("XIAOZHI_WEBHOOK_TIMEOUT_MS", 1200))
+    });
+    if (!response.ok) {
+      console.error(`xiaozhi assistant sink failed: ${response.status} ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error(`xiaozhi assistant sink ignored error: ${error.message || String(error)}`);
   }
 }
 
@@ -412,6 +523,10 @@ function isAuthorized(req, url) {
 
 function isLoopbackHost(host) {
   return ["127.0.0.1", "localhost", "::1"].includes(host);
+}
+
+function stripTrailingSlash(value) {
+  return String(value || "").replace(/\/+$/, "");
 }
 
 function redactRaw(value) {
