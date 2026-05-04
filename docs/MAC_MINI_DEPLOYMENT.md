@@ -5,10 +5,10 @@ The preferred deployment is to make the Mac mini the always-on notification hub 
 ## Target Layout
 
 - Mac mini runs `bridge-server.js`.
-- Mac mini runs optional adapters such as Polymarket polling.
+- Mac mini runs optional adapters such as OpenClaw or custom project monitors.
 - MacBook Pro runs Claude Code, Codex, and other tools normally.
 - MacBook Pro hooks send events through an SSH tunnel.
-- ESP S3 / XiaoZhi reads notifications from the Mac mini.
+- ESP S3 / XiaoZhi either polls this bridge directly or receives visual policy from the XiaoZhi Assistant Hub.
 
 ## Manual Start
 
@@ -121,3 +121,13 @@ Recommended source labels:
 - `mbp-claude`
 - `mini-claude`
 - `openclaw`
+
+For XiaoZhi visual feedback, the assistant hub should own color and brightness policy. A typical policy is:
+
+- running Codex task -> blue-purple breathing
+- running Claude Code task -> orange breathing
+- running OpenClaw task -> teal-green breathing
+- task completion -> brief green high-brightness flash
+- no active task -> return to the configured day/night screen schedule
+
+This lets night mode keep the screen off while idle, but still wake the device for active agent work.

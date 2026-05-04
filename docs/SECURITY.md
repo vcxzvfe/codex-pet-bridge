@@ -55,7 +55,7 @@ GET /esp32/poll?token=<token>
 
 ## Secrets
 
-Do not put API keys directly into event messages. Polymarket or other adapter credentials should live in adapter-specific environment variables on the Mac mini, not on the MacBook Pro.
+Do not put API keys directly into event messages. OpenClaw or other adapter credentials should live in adapter-specific environment variables on the Mac mini, not on the MacBook Pro.
 
 If you enable raw payload storage with `PET_BRIDGE_STORE_RAW=1`, the bridge redacts common secret-like fields such as `token`, `secret`, `password`, `authorization`, and `api_key`, but raw storage should still be treated as sensitive.
 

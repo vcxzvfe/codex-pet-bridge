@@ -1,77 +1,152 @@
+<div align="center">
+
 # Codex Pet Bridge
 
-一个本地桥接原型：把 Claude Code、Claude Desktop、Codex CLI/桌面端等工具的状态事件，统一转成桌面宠物、小智/ESP S3 或其它提醒设备可以订阅的事件流和未读通知队列。
+**Local-first status bridge for Codex, Claude Code, desktop pets, and XiaoZhi devices.**
 
-核心原则是 **不修改上游应用本体**。Claude 侧走官方 hooks / MCP，Codex 侧未来优先走官方 App Server / MCP / 插件扩展点；桌面宠物只需要接入本地 HTTP/SSE 或 webhook。
+One small hub. Every agent state, visible.
 
-## 架构
+English · [中文](README.zh-CN.md)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js 20+](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Status: Alpha](https://img.shields.io/badge/status-alpha-yellow)](#project-status)
+[![Local-first](https://img.shields.io/badge/local--first-yes-2ea44f)](#security-model)
+
+</div>
+
+---
+
+## The Problem
+
+Long-running coding agents are useful only if you notice the right moment to step back in. Codex, Claude Code, Claude Desktop, OpenClaw, and custom automations may all be running on different machines, but their status usually stays trapped inside each app window.
+
+That creates three practical problems:
+
+1. **Attention is fragmented**: one task waits in Codex, another needs approval in Claude Code, and neither is visible from the room.
+2. **Integrations are brittle**: patching app bundles or scraping UI state breaks whenever upstream tools update.
+3. **Physical indicators need a stable contract**: a desktop pet, ESP32 screen, or XiaoZhi robot should consume the same clean event model instead of learning every upstream payload shape.
+
+Codex Pet Bridge is a local notification hub for that missing layer.
+
+## What It Does
+
+- Normalizes upstream agent signals into a stable `PetEvent` model.
+- Builds an unread `PetNotification` queue for events that need human attention.
+- Streams live state to a desktop pet UI over Server-Sent Events.
+- Exposes a compact polling API for ESP32 / XiaoZhi-style devices.
+- Forwards semantic status events to the XiaoZhi Assistant Hub on a Mac mini.
+- Writes JSONL logs for debugging without storing raw prompts by default.
+- Stays local-first: localhost by default, token-protected if exposed to a LAN.
+
+## Architecture
 
 ```mermaid
 flowchart LR
   CC["Claude Code CLI"] -->|"hooks: command/http"| Bridge["codex-pet-bridge"]
-  CD["Claude Desktop"] -->|"MCP tool: pet_emit_event"| Bridge
-  CX["Codex CLI / Desktop"] -->|"App Server/MCP/plugin adapter"| Bridge
-  Bridge -->|"SSE: /stream"| Pet["Desktop Pet UI"]
-  Bridge -->|"GET /esp32/poll"| ESP["ESP S3 / 小智"]
-  Bridge -->|"POST /assistant/notifications"| XiaoZhi["小智 Assistant Hub"]
-  Bridge -->|"POST webhook"| Push["Notification Sink"]
-  Bridge -->|"JSONL log"| Log["events.jsonl"]
+  CD["Claude Desktop / Claude Code"] -->|"MCP tool: pet_emit_event"| Bridge
+  CX["Codex CLI / Desktop"] -->|"notify wrapper / plugin / App Server adapter"| Bridge
+  OC["OpenClaw or custom agents"] -->|"POST /events"| Bridge
+  Bridge -->|"SSE: GET /stream"| Pet["Desktop Pet UI"]
+  Bridge -->|"GET /esp32/poll"| ESP["ESP32 / XiaoZhi display"]
+  Bridge -->|"POST /assistant/notifications"| XiaoZhi["XiaoZhi Assistant Hub"]
+  Bridge -->|"POST webhook"| Push["Push or automation sink"]
+  Bridge -->|"JSONL"| Log["events.jsonl"]
 ```
 
-## 快速运行
+The bridge deliberately avoids patching Codex Desktop, Claude Desktop, Claude Code, or XiaoZhi firmware. Each integration enters through a public hook, MCP tool, webhook, plugin, or polling adapter, then becomes one internal event shape.
+
+XiaoZhi integration is community/home-lab integration work, not an official XiaoZhi product or endorsement.
+
+## Quick Start
 
 ```bash
-node ./src/bridge-server.js
+git clone https://github.com/vcxzvfe/codex-pet-bridge.git
+cd codex-pet-bridge
+npm run start
 ```
 
-默认监听：
+Default URL:
 
 ```text
 http://127.0.0.1:17366
 ```
 
-常用端点：
+Send a test event:
 
-- `POST /events`: 写入事件
-- `GET /events`: 查看最近事件
-- `GET /state`: 查看最新事件
-- `GET /stream`: SSE 事件流，适合桌面宠物实时订阅
-- `GET /notifications`: 查看未读通知
-- `GET /notifications/next`: 查看下一条未读通知
-- `POST /notifications/:id/ack`: 标记一条通知为已读
-- `GET /esp32/poll`: 给 ESP S3 / 小智用的紧凑轮询接口
-- `GET /health`: 健康检查
+```bash
+curl -sS http://127.0.0.1:17366/events \
+  -H 'content-type: application/json' \
+  -d '{
+    "source": "codex",
+    "task": "demo-runtime",
+    "status": "running",
+    "message": "Codex is working on the demo"
+  }'
+```
 
-## 提醒模型
+## API Surface
 
-桥接层区分两类数据：
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /events` | Ingest one normalized or semi-raw upstream event. |
+| `GET /events` | Read recent events. |
+| `GET /state` | Read the latest event and unread count. |
+| `GET /stream` | Subscribe to live events via SSE. |
+| `GET /notifications` | Read unread notifications. |
+| `GET /notifications/next` | Read the next unread notification. |
+| `POST /notifications/:id/ack` | Mark one notification as read. |
+| `POST /notifications/ack-all` | Mark every notification as read. |
+| `GET /esp32/poll` | Compact polling endpoint for ESP32 / XiaoZhi devices. |
+| `GET /health` | Health check. |
 
-- `PetEvent`: 所有状态事件，比如 thinking、working、completed、needs-attention。
-- `PetNotification`: 需要你介入的阶段性提醒，比如任务完成、等待处理、接近完成、出错。
+## Event Model
 
-默认会进入未读通知队列的状态：
+`PetEvent` is the full live feed. It is useful for animation, diagnostics, logs, and downstream adapters.
+
+```json
+{
+  "source": "codex",
+  "task": "mbp-codex-runtime",
+  "status": "running",
+  "message": "MBP Codex task is running",
+  "workspace": "/path/to/project",
+  "sessionId": "optional-upstream-session"
+}
+```
+
+`PetNotification` is the intervention queue. By default, the bridge queues:
 
 ```text
 needs-attention, completed, near-complete, error
 ```
 
-可以用环境变量调整：
+You can change that with:
 
 ```bash
-PET_NOTIFY_STATUSES=needs-attention,completed,error node ./src/bridge-server.js
+PET_NOTIFY_STATUSES=needs-attention,completed,error npm run start
 ```
 
-同一来源、同一会话、同一项目、同一状态和同一消息会做短时间去重，默认 15 秒：
+Events with the same source, task, session, workspace, status, and message are throttled for 15 seconds by default:
 
 ```bash
-PET_NOTIFY_THROTTLE_MS=30000 node ./src/bridge-server.js
+PET_NOTIFY_THROTTLE_MS=30000 npm run start
 ```
 
-## Claude Code CLI 接入
+## Boundaries
 
-把 `pet-claude-hook` 作为观察型 hook 加到用户级 `~/.claude/settings.json` 或项目级 `.claude/settings.json`。
+The bridge is intentionally narrow:
 
-示例：
+- It does not render a pet UI.
+- It does not choose XiaoZhi screen colors, brightness, or night-mode policy.
+- It does not patch upstream app bundles.
+- It does not store full raw upstream payloads unless explicitly configured.
+
+Those responsibilities belong to downstream UIs, the XiaoZhi backend, official upstream extension points, or adapter-specific code.
+
+## Claude Code CLI
+
+Add `pet-claude-hook` as an observational hook in user-level `~/.claude/settings.json` or project-level `.claude/settings.json`.
 
 ```json
 {
@@ -113,23 +188,23 @@ PET_NOTIFY_THROTTLE_MS=30000 node ./src/bridge-server.js
 }
 ```
 
-推荐先只接 `Notification`、`UserPromptSubmit`、`Stop` 三类事件。它们足够驱动宠物的“思考中 / 需要你 / 已完成”状态，也不会把每次工具调用都刷到 UI 上。
+Recommended starter events are `Notification`, `UserPromptSubmit`, and `Stop`. They are enough for "thinking / waiting for you / completed" without flooding the pet or XiaoZhi screen with every tool call.
 
-## Claude Desktop / Claude Code MCP 接入
+Hook failures exit with code `0`; Claude Code should never be blocked because the pet bridge is offline.
 
-MCP 入口提供一个工具：
+## Claude Desktop / MCP
 
-- `pet_emit_event`: 主动发送一句状态或气泡文本给宠物
+The stdio MCP server exposes one tool:
 
-这个工具支持 `status`、`message`、`notify`、`progress`、`workspace`、`sessionId`。如果某个任务接近完成，可以发 `status: "near-complete"`；如果明确需要提醒，即使状态不是默认提醒状态，也可以传 `notify: true`。
+- `pet_emit_event`: send a status bubble or notification event to the bridge.
 
-Claude Code 可用：
+Claude Code:
 
 ```bash
 claude mcp add --transport stdio codex-pet-bridge -- node /ABS/PATH/TO/src/mcp-server.js
 ```
 
-Claude Desktop 可在 `claude_desktop_config.json` 里加入：
+Claude Desktop:
 
 ```json
 {
@@ -146,43 +221,132 @@ Claude Desktop 可在 `claude_desktop_config.json` 里加入：
 }
 ```
 
-## 桌面宠物接入
+## Codex
 
-宠物端最简单的方式是订阅 SSE。普通 `message` 事件会包含所有事件，`notification` 事件只包含需要提醒你的节点：
+Codex integration should stay thin and local. Today, the practical paths are:
+
+- Use a Codex notify wrapper to `POST /events` when a turn ends.
+- Run a lightweight process/activity bridge for "running" state.
+- Add a Codex plugin or App Server adapter later when the public extension point is stable.
+
+Example running event:
+
+```bash
+curl -sS http://127.0.0.1:17366/events \
+  -H 'content-type: application/json' \
+  -d '{
+    "source": "codex",
+    "task": "mbp-codex-runtime",
+    "status": "running",
+    "message": "Codex is working"
+  }'
+```
+
+Example completion event:
+
+```bash
+curl -sS http://127.0.0.1:17366/events \
+  -H 'content-type: application/json' \
+  -d '{
+    "source": "codex",
+    "task": "mbp-codex-runtime",
+    "status": "completed",
+    "message": "Codex task completed",
+    "notify": true
+  }'
+```
+
+## Desktop Pet UI
+
+Subscribe to the SSE stream:
 
 ```js
 const stream = new EventSource("http://127.0.0.1:17366/stream");
+
 stream.onmessage = (event) => {
   const petEvent = JSON.parse(event.data);
   renderPetReaction(petEvent.status, petEvent.message);
 };
+
 stream.addEventListener("notification", (event) => {
   const notification = JSON.parse(event.data);
   showUnreadBubble(notification.title, notification.message);
 });
 ```
 
-如果宠物已经有 HTTP 接收接口，也可以设置：
+If your pet already has an HTTP receiver:
 
 ```bash
-PET_WEBHOOK_URL=http://127.0.0.1:3000/pet/events node ./src/bridge-server.js
+PET_WEBHOOK_URL=http://127.0.0.1:3000/pet/events npm run start
 ```
 
-如果只想把重要提醒推到另一个通知服务：
+If you only want important notifications:
 
 ```bash
-PET_NOTIFICATION_WEBHOOK_URL=http://127.0.0.1:3000/notify node ./src/bridge-server.js
+PET_NOTIFICATION_WEBHOOK_URL=http://127.0.0.1:3000/notify npm run start
 ```
 
-## ESP S3 / 小智接入
+## XiaoZhi Assistant Hub
 
-给 ESP S3 推荐先用 HTTP 轮询，稳定、简单，也不依赖长连接：
+If the Mac mini already runs a XiaoZhi Assistant Hub, prefer forwarding semantic events to that service instead of creating a second device-specific status server.
+
+```bash
+XIAOZHI_ASSISTANT_URL=http://192.168.8.109:8003 \
+XIAOZHI_SOURCE_PREFIX=mbp \
+npm run start
+```
+
+The bridge sends:
+
+```text
+POST <XIAOZHI_ASSISTANT_URL>/assistant/notifications
+```
+
+Payload shape:
+
+```json
+{
+  "source": "mbp-codex",
+  "task": "mbp-codex-runtime",
+  "status": "running",
+  "message": "MBP Codex task is running",
+  "priority": "normal",
+  "needs_user": false
+}
+```
+
+Status mapping:
+
+| Bridge status | XiaoZhi status |
+| --- | --- |
+| `thinking`, `working`, `started`, `running`, `progress`, `near-complete` | `running` |
+| `completed`, `done`, `success`, `finished` | `done` |
+| `needs-attention`, `waiting-user` | `waiting_user` |
+| `error`, `failed`, `blocked` | `error` |
+| `idle`, `clear`, `ack`, `dismissed` | `clear` |
+
+The XiaoZhi backend owns final screen behavior. In the current home setup, active tasks wake the screen even during night mode, Codex uses blue-purple, Claude Code uses orange, OpenClaw uses teal-green, completion briefly flashes green at high brightness, then idle returns to the configured day/night screen schedule.
+
+Recommended source labels:
+
+| Machine / tool | Source |
+| --- | --- |
+| MacBook Pro Codex | `mbp-codex` |
+| Mac mini Codex | `mini-codex` |
+| Windows Codex | `win-codex` |
+| MacBook Pro Claude Code | `mbp-claude` |
+| Mac mini Claude Code | `mini-claude` |
+| OpenClaw | `openclaw` |
+
+## ESP32 / XiaoZhi Polling
+
+For simple firmware or prototype screens, use HTTP polling:
 
 ```http
 GET http://127.0.0.1:17366/esp32/poll
 ```
 
-返回是紧凑 JSON：
+Response:
 
 ```json
 {
@@ -192,6 +356,7 @@ GET http://127.0.0.1:17366/esp32/poll
   "notification": {
     "id": "uuid",
     "source": "claude-code",
+    "task": "project-name",
     "status": "completed",
     "priority": 1,
     "title": "Task completed",
@@ -202,93 +367,90 @@ GET http://127.0.0.1:17366/esp32/poll
 }
 ```
 
-设备播报或显示后，可以标记已读：
+Ack after display or playback:
 
 ```http
 POST http://127.0.0.1:17366/notifications/<id>/ack
 ```
 
-如果设备端只能发 GET，也可以在下一次轮询时带上上一条已处理通知：
+If the device can only send GET:
 
 ```http
 GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 ```
 
-后续如果小智那边已经有 MQTT 或 WebSocket 通道，可以只新增一个 sink adapter，把 `PetNotification` 转成对应协议；Claude/Codex 侧不用改。
+## Security Model
 
-## 小智 Assistant Hub 接入
+This is meant for trusted local machines and home-lab networks, not the public internet.
 
-如果 Mac mini 已经运行小智后端，推荐让本 bridge 直接复用它的 `/assistant/notifications`，不要再给小智单独搭一套状态服务：
+- Binds to `127.0.0.1` by default.
+- Refuses non-loopback listening unless `PET_BRIDGE_TOKEN` is set.
+- Supports `Authorization: Bearer <token>`, `x-pet-bridge-token`, or `?token=...`.
+- Does not store raw upstream payloads unless `PET_BRIDGE_STORE_RAW=1`.
+- Redacts common secret-like fields if raw storage is enabled.
+- Keeps hooks observational so upstream tools continue working if the bridge is offline.
+
+The preferred multi-machine setup is Mac mini as the always-on hub plus SSH tunnels from laptops. See [Mac Mini Deployment](docs/MAC_MINI_DEPLOYMENT.md).
+
+## Project Status
+
+> Alpha. Useful for local experiments, but API details may still change.
+
+Verified in the current codebase:
+
+- HTTP event ingestion
+- SSE live stream
+- unread notification queue and ack
+- Claude Code command hook
+- MCP stdio tool
+- ESP32 polling endpoint
+- XiaoZhi Assistant Hub sink
+- localhost-first security guard
+
+Experimental or deployment-specific:
+
+- official Codex plugin/App Server adapter
+- richer desktop pet UI examples
+- persistent encrypted notification storage
+- packaged launch agents and installers
+- multi-machine device identity policy
+
+## Compatibility
+
+| Integration | Current expectation |
+| --- | --- |
+| Node.js | 20 or later |
+| Claude Code | command hooks and stdio MCP |
+| Claude Desktop | stdio MCP configuration |
+| Codex | notify wrapper, local process bridge, or future plugin/App Server adapter |
+| XiaoZhi | Assistant Hub endpoint compatible with `/assistant/notifications` |
+| ESP32 | HTTP polling against `/esp32/poll` |
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Security](docs/SECURITY.md)
+- [Mac Mini Deployment](docs/MAC_MINI_DEPLOYMENT.md)
+- [References](docs/REFERENCES.md)
+
+## Validation
 
 ```bash
-XIAOZHI_ASSISTANT_URL=http://192.168.8.109:8003 \
-XIAOZHI_SOURCE_PREFIX=mbp \
-node ./src/bridge-server.js
+npm run smoke
 ```
 
-bridge 会把内部状态映射成当前小智后端的稳定 payload：
-
-```json
-{
-  "source": "mbp-codex",
-  "task": "mbp-codex-active",
-  "status": "done",
-  "message": "Codex turn ended",
-  "priority": "normal",
-  "needs_user": true
-}
-```
-
-映射规则：
-
-- `thinking / working / started / running / progress / near-complete` -> `running`
-- `completed / done / success / finished` -> `done + needs_user`
-- `needs-attention / waiting-user` -> `waiting_user + needs_user`
-- `error / failed / blocked` -> `error + needs_user`
-- 通知 ack -> `clear`
-
-当前小智后端会负责最终视觉策略：Codex 蓝紫运行、Claude 橙色运行、完成时绿色快速闪烁并临时拉高亮度，然后自动恢复。bridge 只负责发语义事件，不直接决定屏幕颜色。
-
-为了避免多设备互相覆盖，`source` 和 `task` 必须稳定。推荐：
-
-- MBP Codex: `source=mbp-codex`, `task=mbp-codex-active`
-- Mac mini Codex: `source=mini-codex`
-- Windows Codex: `source=win-codex`
-- MBP Claude Code: `source=mbp-claude`
-- Mac mini Claude Code: `source=mini-claude`
-
-如果小智后端未来加鉴权，可以设置：
-
-```bash
-XIAOZHI_WEBHOOK_TOKEN="<token>"
-```
-
-## 面向未来更新的边界
-
-- 不 patch Codex Desktop、Claude Desktop 或 Claude Code 的安装包。
-- 只使用官方扩展点：Claude Code hooks、MCP、本地插件；Codex 侧优先 App Server / MCP / Codex 插件。
-- 所有上游事件先规范化成内部 `PetEvent`，UI 不依赖 Claude/Codex 的原始 payload。
-- 所有提醒再规范化成内部 `PetNotification`，桌面宠物、ESP S3、手机推送都消费同一种提醒格式。
-- hook 失败时退出码仍为 0，不阻塞 Claude Code 的正常工作。
-- 桥接层可同时支持 SSE、HTTP polling、webhook、JSONL 日志；未来换宠物 UI 或加入小智设备时不用改 Claude/Codex 配置。
-
-## 更多文档
-
-- [Architecture](./docs/ARCHITECTURE.md)
-- [Security](./docs/SECURITY.md)
-- [Mac Mini Deployment](./docs/MAC_MINI_DEPLOYMENT.md)
-- [References](./docs/REFERENCES.md)
-
-## 验证
+or:
 
 ```bash
 node ./test/smoke.js
 ```
 
-如果你的机器有 `npm`，也可以使用 `npm run start` 和 `npm run smoke`。
+## Contributing
 
-## 参考
+Issues and PRs are welcome. Good first contributions include new adapters, desktop pet UI examples, documentation fixes, and test coverage for real multi-machine setups.
 
-- OpenAI: Codex Desktop App 和 Codex harness 共享 App Server / JSON-RPC 方向。
-- Claude Code 官方文档: hooks 支持 command/http/MCP tool，hook 输入包含 `session_id`、`cwd`、`hook_event_name` 等字段。
-- Claude Code 官方文档: MCP 支持 `claude mcp add`、`claude mcp add-json`，也可从 Claude Desktop 导入 MCP 配置。
+Please keep integrations thin: use official hooks, MCP, plugins, local HTTP, or polling APIs; do not patch upstream app bundles.
+
+## License
+
+[MIT](LICENSE) © 2026 Zifan and Codex Pet Bridge contributors.

@@ -66,7 +66,7 @@ try {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       source: "codex",
-      task: "mbp-codex-active",
+      task: "mbp-codex-runtime",
       status: "completed",
       message: "Codex turn ended",
       notify: true
@@ -81,7 +81,7 @@ try {
   if (clear.status !== "clear" || clear.needs_user !== false) {
     throw new Error("notification ack was not forwarded to XiaoZhi as clear");
   }
-  if (done.source !== "mbp-codex" || done.status !== "done" || done.task !== "mbp-codex-active" || !done.needs_user) {
+  if (done.source !== "mbp-codex" || done.status !== "done" || done.task !== "mbp-codex-runtime" || !done.needs_user) {
     throw new Error("Codex completion event was not forwarded to XiaoZhi correctly");
   }
 

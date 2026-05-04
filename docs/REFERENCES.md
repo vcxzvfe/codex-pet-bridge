@@ -8,7 +8,7 @@ Useful projects and documents to learn from:
 - Model Context Protocol authorization specification: https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization
 - CCNotify: https://github.com/dazuiba/CCNotify
 - code-notify: https://github.com/mylee04/code-notify
-- Polymarket API documentation: https://docs.polymarket.com/api-reference
+- OpenAI Codex: https://openai.com/codex
 
 Design takeaways:
 
@@ -17,3 +17,4 @@ Design takeaways:
 - Use localhost and SSH tunnels for cross-machine notification routing.
 - Treat hardware devices as notification consumers, not as the source of truth.
 - Keep an internal notification queue so multiple consumers can read and acknowledge the same events.
+- Keep XiaoZhi-specific colors, brightness, and night-mode behavior in the XiaoZhi backend; the bridge should send semantic task events.

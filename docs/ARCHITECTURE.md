@@ -1,6 +1,6 @@
 # Architecture
 
-Codex Pet Bridge is a local notification hub for coding agents and small ambient devices.
+Codex Pet Bridge is a local-first status hub for coding agents, desktop pets, and small ambient devices such as XiaoZhi.
 
 The bridge deliberately avoids patching Codex Desktop, Claude Desktop, Claude Code, or device firmware. Every upstream integration should enter through a stable public extension point, then be normalized into one internal event shape.
 
@@ -10,8 +10,8 @@ The bridge deliberately avoids patching Codex Desktop, Claude Desktop, Claude Co
 flowchart LR
   ClaudeCode["Claude Code CLI"] -->|"command hook"| Hook["claude-hook.js"]
   ClaudeDesktop["Claude Desktop"] -->|"MCP stdio"| MCP["mcp-server.js"]
-  Codex["Codex Desktop / CLI"] -->|"MCP / App Server adapter"| Bridge["bridge-server.js"]
-  Polymarket["Polymarket adapter"] -->|"POST /events"| Bridge
+  Codex["Codex Desktop / CLI"] -->|"notify wrapper / plugin / App Server adapter"| Bridge["bridge-server.js"]
+  Custom["OpenClaw / custom adapter"] -->|"POST /events"| Bridge
   Hook -->|"POST /events"| Bridge
   MCP -->|"POST /events"| Bridge
   Bridge -->|"SSE /stream"| Pet["Desktop Pet"]
@@ -52,14 +52,16 @@ When `XIAOZHI_ASSISTANT_URL` is set, the bridge forwards normalized semantic eve
 POST <XIAOZHI_ASSISTANT_URL>/assistant/notifications
 ```
 
-This sink deliberately reuses the assistant hub's existing `source/task/status/message/priority/needs_user` contract. The bridge does not choose screen colors or brightness directly. The XiaoZhi backend owns visual policy, including Codex blue-purple running state, Claude orange running state, and green completion flashes.
+This sink deliberately reuses the assistant hub's existing `source/task/status/message/priority/needs_user` contract. The bridge does not choose screen colors or brightness directly. The XiaoZhi backend owns visual policy, including Codex blue-purple running state, Claude orange running state, OpenClaw teal-green running state, green completion flashes, and day/night screen brightness.
 
 Status mapping:
 
 - active states become `running`
-- completed states become `done` with `needs_user=true`
+- completed states become `done`
 - attention states become `waiting_user` with `needs_user=true`
 - failures become `error` with `needs_user=true`
 - notification ack becomes `clear`
 
-Use stable `source + task` values so the assistant hub can maintain one active/pending state per real task.
+Use stable `source + task` values so the assistant hub can maintain one active or completed state per real task. The recommended source labels are `mbp-codex`, `mini-codex`, `win-codex`, `mbp-claude`, `mini-claude`, and `openclaw`.
+
+In the current XiaoZhi backend policy, active tasks override night screen-off mode. When all tasks complete, the backend returns to idle; during scheduled night hours idle means brightness `0`.
