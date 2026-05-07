@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import http from "node:http";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -17,6 +17,11 @@ const MAX_EVENTS = numberFromEnv("PET_BRIDGE_MAX_EVENTS", 200);
 const MAX_NOTIFICATIONS = numberFromEnv("PET_BRIDGE_MAX_NOTIFICATIONS", 100);
 const MAX_BODY_BYTES = numberFromEnv("PET_BRIDGE_MAX_BODY_BYTES", 65536);
 const MAX_MESSAGE_CHARS = numberFromEnv("PET_BRIDGE_MAX_MESSAGE_CHARS", 500);
+const STATE_PATH = resolve(process.env.PET_BRIDGE_STATE || "./bridge-state.json");
+const OUTBOX_MAX = numberFromEnv("PET_BRIDGE_OUTBOX_MAX", 300);
+const OUTBOX_FLUSH_MAX = numberFromEnv("PET_BRIDGE_OUTBOX_FLUSH_MAX", 25);
+const OUTBOX_FLUSH_INTERVAL_MS = numberFromEnv("PET_BRIDGE_OUTBOX_FLUSH_INTERVAL_MS", 30000);
+const SINK_TIMEOUT_MS = numberFromEnv("PET_BRIDGE_SINK_TIMEOUT_MS", numberFromEnv("XIAOZHI_WEBHOOK_TIMEOUT_MS", 1200));
 const STORE_RAW_EVENTS = process.env.PET_BRIDGE_STORE_RAW === "1";
 const NOTIFY_STATUSES = new Set(
   (process.env.PET_NOTIFY_STATUSES || "needs-attention,completed,near-complete,error")
@@ -29,14 +34,23 @@ const NOTIFICATION_WEBHOOK_URL = process.env.PET_NOTIFICATION_WEBHOOK_URL || "";
 
 const recentEvents = [];
 const recentNotifications = [];
+const sinkOutbox = [];
 const notificationThrottle = new Map();
 const sseClients = new Set();
+const deliveryState = {
+  lastError: "",
+  lastSuccessAt: ""
+};
+let flushPromise = null;
+let persistPromise = Promise.resolve();
 
 if (!isLoopbackHost(HOST) && !INBOUND_TOKEN && process.env.PET_BRIDGE_ALLOW_UNAUTH_REMOTE !== "1") {
   console.error("Refusing to listen on a non-loopback host without PET_BRIDGE_TOKEN.");
   console.error("Use SSH tunneling, set PET_BRIDGE_TOKEN, or set PET_BRIDGE_ALLOW_UNAUTH_REMOTE=1 for a trusted lab network.");
   process.exit(1);
 }
+
+await loadPersistentState();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -59,7 +73,10 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         service: "codex-pet-bridge",
         events: recentEvents.length,
-        notifications: unreadNotifications().length
+        notifications: unreadNotifications().length,
+        outboxDepth: sinkOutbox.length,
+        lastDeliveryError: deliveryState.lastError || null,
+        lastDeliverySuccessAt: deliveryState.lastSuccessAt || null
       });
       return;
     }
@@ -94,7 +111,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/esp32/poll") {
       const ackId = url.searchParams.get("ack");
-      if (ackId) ackNotification(ackId);
+      if (ackId) await ackNotification(ackId);
       sendJson(res, 200, compactDeviceState());
       return;
     }
@@ -114,13 +131,13 @@ const server = http.createServer(async (req, res) => {
 
     const ackMatch = url.pathname.match(/^\/notifications\/([^/]+)\/ack$/);
     if (req.method === "POST" && ackMatch) {
-      const notification = ackNotification(ackMatch[1]);
+      const notification = await ackNotification(ackMatch[1]);
       sendJson(res, notification ? 200 : 404, { ok: Boolean(notification), notification });
       return;
     }
 
     if (req.method === "POST" && url.pathname === "/notifications/ack-all") {
-      const count = ackAllNotifications();
+      const count = await ackAllNotifications();
       sendJson(res, 200, { ok: true, count });
       return;
     }
@@ -143,7 +160,16 @@ server.listen(PORT, HOST, () => {
   if (XIAOZHI_ASSISTANT_URL) {
     console.log(`xiaozhi assistant sink enabled: ${XIAOZHI_ASSISTANT_URL}`);
   }
+  if (sinkOutbox.length) {
+    console.log(`sink outbox loaded: ${sinkOutbox.length} pending delivery records`);
+  }
 });
+
+setInterval(() => {
+  void flushSinkOutbox();
+}, OUTBOX_FLUSH_INTERVAL_MS).unref();
+
+void flushSinkOutbox();
 
 function normalizeEvent(input = {}) {
   const now = new Date().toISOString();
@@ -208,15 +234,20 @@ async function publishEvent(event) {
   await appendFile(LOG_PATH, `${JSON.stringify(event)}\n`, "utf8");
 
   broadcastSse(event);
-  await postWebhook(event);
-  await postXiaozhiNotification(event);
 
   const notification = createNotification(event);
   if (notification) {
     recentNotifications.unshift(notification);
     while (recentNotifications.length > MAX_NOTIFICATIONS) recentNotifications.pop();
     broadcastSse(notification, "notification");
-    await postWebhook(notification, NOTIFICATION_WEBHOOK_URL);
+  }
+
+  await persistState();
+  void flushSinkOutbox();
+  void postWebhook(event, "webhook:event");
+  void postXiaozhiNotification(event);
+  if (notification) {
+    void postWebhook(notification, "webhook:notification");
   }
 }
 
@@ -306,26 +337,28 @@ function unreadNotifications() {
   return recentNotifications.filter((notification) => !notification.read);
 }
 
-function ackNotification(id) {
+async function ackNotification(id) {
   const notification = recentNotifications.find((item) => item.id === id);
   if (!notification) return null;
   notification.read = true;
   notification.readAt = new Date().toISOString();
-  void postXiaozhiClear(notification);
+  await persistState();
+  await postXiaozhiClear(notification);
   return notification;
 }
 
-function ackAllNotifications() {
+async function ackAllNotifications() {
   const now = new Date().toISOString();
   let count = 0;
   for (const notification of recentNotifications) {
     if (!notification.read) {
       notification.read = true;
       notification.readAt = now;
-      void postXiaozhiClear(notification);
+      await postXiaozhiClear(notification);
       count += 1;
     }
   }
+  await persistState();
   return count;
 }
 
@@ -351,27 +384,15 @@ function compactDeviceState() {
   };
 }
 
-async function postWebhook(event, targetUrl = WEBHOOK_URL) {
-  if (!targetUrl) return;
-  const headers = { "content-type": "application/json" };
-  if (WEBHOOK_TOKEN) headers.authorization = `Bearer ${WEBHOOK_TOKEN}`;
-
-  const response = await fetch(targetUrl, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(event)
-  });
-
-  if (!response.ok) {
-    console.error(`webhook failed: ${response.status} ${response.statusText}`);
-  }
+async function postWebhook(event, kind) {
+  await sendOrQueueSink(kind, event);
 }
 
 async function postXiaozhiNotification(event) {
   if (!XIAOZHI_ASSISTANT_URL) return;
   const payload = xiaozhiPayloadForEvent(event);
   if (!payload) return;
-  await safePostJson(`${XIAOZHI_ASSISTANT_URL}/assistant/notifications`, payload, xiaozhiHeaders());
+  await sendOrQueueSink("xiaozhi:event", payload);
 }
 
 async function postXiaozhiClear(notification) {
@@ -384,7 +405,7 @@ async function postXiaozhiClear(notification) {
     priority: priorityName(notification.priority),
     needs_user: false
   };
-  await safePostJson(`${XIAOZHI_ASSISTANT_URL}/assistant/notifications`, payload, xiaozhiHeaders());
+  await sendOrQueueSink("xiaozhi:clear", payload);
 }
 
 function xiaozhiPayloadForEvent(event) {
@@ -450,19 +471,158 @@ function xiaozhiHeaders() {
   return headers;
 }
 
-async function safePostJson(targetUrl, payload, headers) {
+async function sendOrQueueSink(kind, payload) {
+  const target = sinkTarget(kind);
+  if (!target) return;
+  const result = await postJsonWithTimeout(target.url, payload, target.headers);
+  if (result.ok) {
+    deliveryState.lastSuccessAt = new Date().toISOString();
+    deliveryState.lastError = "";
+    await persistState();
+    return;
+  }
+  enqueueSink(kind, payload, result.error);
+  await persistState();
+}
+
+async function flushSinkOutbox() {
+  if (flushPromise) return flushPromise;
+  flushPromise = doFlushSinkOutbox().finally(() => {
+    flushPromise = null;
+  });
+  return flushPromise;
+}
+
+async function doFlushSinkOutbox() {
+  if (!sinkOutbox.length) return;
+  const pending = sinkOutbox.splice(0, sinkOutbox.length);
+  const remaining = [];
+  let delivered = 0;
+  for (const item of pending) {
+    if (delivered >= OUTBOX_FLUSH_MAX) {
+      remaining.push(item);
+      continue;
+    }
+    const target = sinkTarget(item.kind);
+    if (!target) {
+      remaining.push(item);
+      continue;
+    }
+    const result = await postJsonWithTimeout(target.url, item.payload, target.headers);
+    if (result.ok) {
+      delivered += 1;
+      deliveryState.lastSuccessAt = new Date().toISOString();
+      deliveryState.lastError = "";
+      continue;
+    }
+    remaining.push({
+      ...item,
+      attempts: Number(item.attempts || 0) + 1,
+      lastError: result.error,
+      lastAttemptAt: new Date().toISOString()
+    });
+  }
+  const combined = [...remaining, ...sinkOutbox].slice(-OUTBOX_MAX);
+  sinkOutbox.splice(0, sinkOutbox.length, ...combined);
+  await persistState();
+}
+
+function enqueueSink(kind, payload, reason) {
+  sinkOutbox.push({
+    id: randomUUID(),
+    kind,
+    payload,
+    attempts: 0,
+    createdAt: new Date().toISOString(),
+    lastError: reason
+  });
+  while (sinkOutbox.length > OUTBOX_MAX) sinkOutbox.shift();
+  deliveryState.lastError = `${kind}: ${reason}`;
+}
+
+function sinkTarget(kind) {
+  if (kind === "webhook:event") {
+    if (!WEBHOOK_URL) return null;
+    return { url: WEBHOOK_URL, headers: webhookHeaders(WEBHOOK_TOKEN) };
+  }
+  if (kind === "webhook:notification") {
+    if (!NOTIFICATION_WEBHOOK_URL) return null;
+    return { url: NOTIFICATION_WEBHOOK_URL, headers: webhookHeaders(WEBHOOK_TOKEN) };
+  }
+  if (kind === "xiaozhi:event" || kind === "xiaozhi:clear") {
+    if (!XIAOZHI_ASSISTANT_URL) return null;
+    return {
+      url: `${XIAOZHI_ASSISTANT_URL}/assistant/notifications`,
+      headers: xiaozhiHeaders()
+    };
+  }
+  return null;
+}
+
+function webhookHeaders(token) {
+  const headers = { "content-type": "application/json" };
+  if (token) headers.authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function postJsonWithTimeout(targetUrl, payload, headers) {
   try {
     const response = await fetch(targetUrl, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(numberFromEnv("XIAOZHI_WEBHOOK_TIMEOUT_MS", 1200))
+      signal: AbortSignal.timeout(SINK_TIMEOUT_MS)
     });
     if (!response.ok) {
-      console.error(`xiaozhi assistant sink failed: ${response.status} ${response.statusText}`);
+      const error = `${response.status} ${response.statusText}`;
+      console.error(`sink failed: ${error}`);
+      return { ok: false, error };
     }
+    return { ok: true };
   } catch (error) {
-    console.error(`xiaozhi assistant sink ignored error: ${error.message || String(error)}`);
+    const message = error.message || String(error);
+    console.error(`sink ignored error: ${message}`);
+    return { ok: false, error: message };
+  }
+}
+
+async function loadPersistentState() {
+  try {
+    const state = JSON.parse(await readFile(STATE_PATH, "utf8"));
+    if (Array.isArray(state.notifications)) {
+      recentNotifications.push(...state.notifications.slice(0, MAX_NOTIFICATIONS));
+    }
+    if (Array.isArray(state.outbox)) {
+      sinkOutbox.push(...state.outbox.slice(-OUTBOX_MAX));
+    }
+    if (state.deliveryState && typeof state.deliveryState === "object") {
+      deliveryState.lastError = stringValue(state.deliveryState.lastError);
+      deliveryState.lastSuccessAt = stringValue(state.deliveryState.lastSuccessAt);
+    }
+  } catch {
+    // Missing or unreadable state should not stop the bridge.
+  }
+}
+
+function persistState() {
+  persistPromise = persistPromise.catch(() => {}).then(writePersistentState);
+  return persistPromise;
+}
+
+async function writePersistentState() {
+  try {
+    await mkdir(dirname(STATE_PATH), { recursive: true });
+    const state = {
+      version: 1,
+      notifications: recentNotifications.slice(0, MAX_NOTIFICATIONS),
+      outbox: sinkOutbox.slice(-OUTBOX_MAX),
+      deliveryState
+    };
+    const tmpPath = `${STATE_PATH}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    await writeFile(tmpPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    await rename(tmpPath, STATE_PATH);
+  } catch {
+    // State persistence is best-effort; event ingestion remains available.
   }
 }
 

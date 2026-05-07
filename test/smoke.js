@@ -24,8 +24,11 @@ const server = spawn(process.execPath, ["./src/bridge-server.js"], {
     ...process.env,
     PET_BRIDGE_PORT: String(port),
     PET_BRIDGE_LOG: "./test/events.jsonl",
+    PET_BRIDGE_STATE: "./test/bridge-state.json",
+    PET_BRIDGE_SINK_TIMEOUT_MS: "80",
+    PET_WEBHOOK_URL: "http://127.0.0.1:9/unreachable",
     XIAOZHI_ASSISTANT_URL: `http://127.0.0.1:${xiaozhiPort}`,
-    XIAOZHI_SOURCE_PREFIX: "mbp"
+    XIAOZHI_SOURCE_PREFIX: "laptop"
   },
   stdio: ["ignore", "pipe", "pipe"]
 });
@@ -51,6 +54,7 @@ try {
   const notificationsBody = await notificationsResponse.json();
   if (!notificationsBody.ok || notificationsBody.unreadCount !== 1) throw new Error("notification was not queued");
   if (notificationsBody.notifications[0].title !== "Waiting for you") throw new Error("notification title was not mapped");
+  await waitForOutboxDepth(port, 1);
 
   const deviceResponse = await fetch(`http://127.0.0.1:${port}/esp32/poll`);
   const deviceBody = await deviceResponse.json();
@@ -66,7 +70,7 @@ try {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       source: "codex",
-      task: "mbp-codex-runtime",
+      task: "laptop-codex-runtime",
       status: "completed",
       message: "Codex turn ended",
       notify: true
@@ -75,13 +79,13 @@ try {
 
   await waitForXiaozhiRequests(3);
   const [attention, clear, done] = xiaozhiRequests.map((item) => item.body);
-  if (attention.source !== "mbp-claude" || attention.status !== "waiting_user" || !attention.needs_user) {
+  if (attention.source !== "laptop-claude" || attention.status !== "waiting_user" || !attention.needs_user) {
     throw new Error("Claude attention event was not forwarded to XiaoZhi correctly");
   }
   if (clear.status !== "clear" || clear.needs_user !== false) {
     throw new Error("notification ack was not forwarded to XiaoZhi as clear");
   }
-  if (done.source !== "mbp-codex" || done.status !== "done" || done.task !== "mbp-codex-runtime" || !done.needs_user) {
+  if (done.source !== "laptop-codex" || done.status !== "done" || done.task !== "laptop-codex-runtime" || !done.needs_user) {
     throw new Error("Codex completion event was not forwarded to XiaoZhi correctly");
   }
 
@@ -109,4 +113,14 @@ async function waitForXiaozhiRequests(count) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`xiaozhi sink received ${xiaozhiRequests.length}, expected ${count}`);
+}
+
+async function waitForOutboxDepth(port, minDepth) {
+  for (let index = 0; index < 30; index += 1) {
+    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    const body = await response.json();
+    if (body.outboxDepth >= minDepth) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("failed webhook sink did not enter outbox");
 }

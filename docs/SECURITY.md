@@ -9,8 +9,9 @@ This project is meant to be run on trusted machines and small private networks. 
 - If `PET_BRIDGE_HOST` is set to a non-loopback address and `PET_BRIDGE_TOKEN` is not set, the server refuses to start.
 - Request bodies are capped by `PET_BRIDGE_MAX_BODY_BYTES`.
 - Notification messages are truncated by `PET_BRIDGE_MAX_MESSAGE_CHARS`.
+- Optional outbound sinks use short timeouts and a bounded local outbox, so webhook outages do not block event ingestion.
 
-## Recommended Mac Mini Setup
+## Recommended Mac mini Setup
 
 Run the bridge on the Mac mini bound to localhost:
 
@@ -58,6 +59,8 @@ GET /esp32/poll?token=<token>
 Do not put API keys directly into event messages. OpenClaw or other adapter credentials should live in adapter-specific environment variables on the Mac mini, not on the MacBook Pro.
 
 If you enable raw payload storage with `PET_BRIDGE_STORE_RAW=1`, the bridge redacts common secret-like fields such as `token`, `secret`, `password`, `authorization`, and `api_key`, but raw storage should still be treated as sensitive.
+
+Generated state files such as `bridge-state.json`, `events.jsonl`, and `~/.codex-pet-bridge/*.jsonl` should be treated as local operational data and kept out of Git.
 
 ## XiaoZhi Assistant Sink
 

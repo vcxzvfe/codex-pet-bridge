@@ -106,10 +106,10 @@ curl -sS http://127.0.0.1:17366/events \
 
 ```json
 {
-  "source": "codex",
-  "task": "mbp-codex-runtime",
+  "source": "laptop-codex",
+  "task": "laptop-codex-runtime",
   "status": "running",
-  "message": "MBP Codex task is running",
+  "message": "Laptop Codex task is running",
   "workspace": "/path/to/project",
   "sessionId": "optional-upstream-session"
 }
@@ -190,7 +190,7 @@ Add `pet-claude-hook` as an observational hook in user-level `~/.claude/settings
 
 Recommended starter events are `Notification`, `UserPromptSubmit`, and `Stop`. They are enough for "thinking / waiting for you / completed" without flooding the pet or XiaoZhi screen with every tool call.
 
-Hook failures exit with code `0`; Claude Code should never be blocked because the pet bridge is offline.
+Hook failures exit with code `0`; Claude Code should never be blocked because the pet bridge is offline. Failed sends are written to the same bounded `PET_NOTIFY_QUEUE` used by `pet-notify`, and `pet-notify --flush` retries them later.
 
 ## Claude Desktop / MCP
 
@@ -225,9 +225,28 @@ Claude Desktop:
 
 Codex integration should stay thin and local. Today, the practical paths are:
 
-- Use a Codex notify wrapper to `POST /events` when a turn ends.
-- Run a lightweight process/activity bridge for "running" state.
+- Use `pet-notify` from a Codex notify wrapper when a turn ends.
+- Run `pet-agent-sync` as a lightweight activity bridge for "running" state.
 - Add a Codex plugin or App Server adapter later when the public extension point is stable.
+
+`pet-notify` has a bounded disk queue. If the bridge is offline, the hook exits quickly and retries later instead of blocking Codex:
+
+```bash
+pet-notify \
+  --source laptop-codex \
+  --task laptop-codex-runtime \
+  --status completed \
+  --message "Codex task completed" \
+  --notify
+```
+
+`pet-agent-sync` can run once from cron/launchd or stay resident:
+
+```bash
+PET_AGENT_SYNC_PREFIX=laptop pet-agent-sync --watch
+```
+
+It reads recent Codex session activity and lightweight local process state. The defaults are intentionally conservative; official Codex hooks or plugins should replace this adapter when they are available.
 
 Example running event:
 
@@ -235,8 +254,8 @@ Example running event:
 curl -sS http://127.0.0.1:17366/events \
   -H 'content-type: application/json' \
   -d '{
-    "source": "codex",
-    "task": "mbp-codex-runtime",
+    "source": "laptop-codex",
+    "task": "laptop-codex-runtime",
     "status": "running",
     "message": "Codex is working"
   }'
@@ -248,8 +267,8 @@ Example completion event:
 curl -sS http://127.0.0.1:17366/events \
   -H 'content-type: application/json' \
   -d '{
-    "source": "codex",
-    "task": "mbp-codex-runtime",
+    "source": "laptop-codex",
+    "task": "laptop-codex-runtime",
     "status": "completed",
     "message": "Codex task completed",
     "notify": true
@@ -291,8 +310,8 @@ PET_NOTIFICATION_WEBHOOK_URL=http://127.0.0.1:3000/notify npm run start
 If the Mac mini already runs a XiaoZhi Assistant Hub, prefer forwarding semantic events to that service instead of creating a second device-specific status server.
 
 ```bash
-XIAOZHI_ASSISTANT_URL=http://192.168.8.109:8003 \
-XIAOZHI_SOURCE_PREFIX=mbp \
+XIAOZHI_ASSISTANT_URL=http://127.0.0.1:8003 \
+XIAOZHI_SOURCE_PREFIX=laptop \
 npm run start
 ```
 
@@ -306,10 +325,10 @@ Payload shape:
 
 ```json
 {
-  "source": "mbp-codex",
-  "task": "mbp-codex-runtime",
+  "source": "laptop-codex",
+  "task": "laptop-codex-runtime",
   "status": "running",
-  "message": "MBP Codex task is running",
+  "message": "Laptop Codex task is running",
   "priority": "normal",
   "needs_user": false
 }
@@ -325,17 +344,17 @@ Status mapping:
 | `error`, `failed`, `blocked` | `error` |
 | `idle`, `clear`, `ack`, `dismissed` | `clear` |
 
-The XiaoZhi backend owns final screen behavior. In the current home setup, active tasks wake the screen even during night mode, Codex uses blue-purple, Claude Code uses orange, OpenClaw uses teal-green, completion briefly flashes green at high brightness, then idle returns to the configured day/night screen schedule.
+The XiaoZhi backend owns final screen behavior. A typical downstream policy is: active tasks wake the screen even during night mode; Codex uses blue-purple; Claude Code uses orange; OpenClaw uses teal-green; completion briefly flashes green at high brightness; idle returns to the configured day/night screen schedule.
 
 Recommended source labels:
 
 | Machine / tool | Source |
 | --- | --- |
-| MacBook Pro Codex | `mbp-codex` |
-| Mac mini Codex | `mini-codex` |
+| Laptop Codex | `laptop-codex` |
+| Hub Codex | `hub-codex` |
 | Windows Codex | `win-codex` |
-| MacBook Pro Claude Code | `mbp-claude` |
-| Mac mini Claude Code | `mini-claude` |
+| Laptop Claude Code | `laptop-claude` |
+| Hub Claude Code | `hub-claude` |
 | OpenClaw | `openclaw` |
 
 ## ESP32 / XiaoZhi Polling
@@ -390,7 +409,7 @@ This is meant for trusted local machines and home-lab networks, not the public i
 - Redacts common secret-like fields if raw storage is enabled.
 - Keeps hooks observational so upstream tools continue working if the bridge is offline.
 
-The preferred multi-machine setup is Mac mini as the always-on hub plus SSH tunnels from laptops. See [Mac Mini Deployment](docs/MAC_MINI_DEPLOYMENT.md).
+The preferred multi-machine setup is Mac mini as the always-on hub plus SSH tunnels from laptops. See [Mac mini Deployment](docs/MAC_MINI_DEPLOYMENT.md).
 
 ## Project Status
 
@@ -401,7 +420,10 @@ Verified in the current codebase:
 - HTTP event ingestion
 - SSE live stream
 - unread notification queue and ack
+- bounded client-side `pet-notify` queue
+- bounded bridge sink outbox
 - Claude Code command hook
+- lightweight Codex/Claude activity sync helper
 - MCP stdio tool
 - ESP32 polling endpoint
 - XiaoZhi Assistant Hub sink
@@ -412,8 +434,7 @@ Experimental or deployment-specific:
 - official Codex plugin/App Server adapter
 - richer desktop pet UI examples
 - persistent encrypted notification storage
-- packaged launch agents and installers
-- multi-machine device identity policy
+- packaged installers
 
 ## Compatibility
 
@@ -430,7 +451,7 @@ Experimental or deployment-specific:
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security](docs/SECURITY.md)
-- [Mac Mini Deployment](docs/MAC_MINI_DEPLOYMENT.md)
+- [Mac mini Deployment](docs/MAC_MINI_DEPLOYMENT.md)
 - [References](docs/REFERENCES.md)
 
 ## Validation
@@ -453,4 +474,4 @@ Please keep integrations thin: use official hooks, MCP, plugins, local HTTP, or 
 
 ## License
 
-[MIT](LICENSE) © 2026 Zifan and Codex Pet Bridge contributors.
+[MIT](LICENSE) © 2026 vcxzvfe and Codex Pet Bridge contributors.

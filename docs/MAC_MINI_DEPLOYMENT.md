@@ -1,4 +1,4 @@
-# Mac Mini Deployment
+# Mac mini Deployment
 
 The preferred deployment is to make the Mac mini the always-on notification hub while keeping the MacBook Pro free of background daemons.
 
@@ -30,7 +30,7 @@ ssh -N -L 17366:127.0.0.1:17366 mac-mini
 For a lightweight always-on setup on the Mac mini, create:
 
 ```text
-~/Library/LaunchAgents/com.zifan.codex-pet-bridge.plist
+~/Library/LaunchAgents/com.example.codex-pet-bridge.plist
 ```
 
 Example:
@@ -42,7 +42,7 @@ Example:
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.zifan.codex-pet-bridge</string>
+  <string>com.example.codex-pet-bridge</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/env</string>
@@ -69,7 +69,7 @@ Example:
 Load it:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.zifan.codex-pet-bridge.plist
+launchctl load ~/Library/LaunchAgents/com.example.codex-pet-bridge.plist
 ```
 
 Check it:
@@ -107,7 +107,7 @@ For events coming from the MacBook Pro through an SSH tunnel, add a stable devic
 
 ```bash
 XIAOZHI_ASSISTANT_URL=http://127.0.0.1:8003 \
-XIAOZHI_SOURCE_PREFIX=mbp \
+XIAOZHI_SOURCE_PREFIX=laptop \
 node ./src/bridge-server.js
 ```
 
@@ -115,11 +115,11 @@ The assistant hub receives `/assistant/notifications` payloads and drives the sc
 
 Recommended source labels:
 
-- `mbp-codex`
-- `mini-codex`
+- `laptop-codex`
+- `hub-codex`
 - `win-codex`
-- `mbp-claude`
-- `mini-claude`
+- `laptop-claude`
+- `hub-claude`
 - `openclaw`
 
 For XiaoZhi visual feedback, the assistant hub should own color and brightness policy. A typical policy is:
@@ -131,3 +131,17 @@ For XiaoZhi visual feedback, the assistant hub should own color and brightness p
 - no active task -> return to the configured day/night screen schedule
 
 This lets night mode keep the screen off while idle, but still wake the device for active agent work.
+
+## Laptop-side sync helper
+
+On a laptop, `pet-agent-sync` can emit low-frequency running/completed events without keeping a heavy UI poller alive:
+
+```bash
+PET_BRIDGE_URL=http://127.0.0.1:17366/events \
+PET_AGENT_SYNC_PREFIX=laptop \
+pet-agent-sync --watch
+```
+
+For launchd, run it with a `StartInterval` such as 15 seconds or keep it resident with `--watch`. `pet-agent-sync` uses `pet-notify`, so brief bridge outages are written to a bounded local queue and retried later.
+
+The bundled process scanner currently targets macOS command-line tools. Windows or Linux hosts should use the same `pet-notify` event contract with a platform-specific adapter.

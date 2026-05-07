@@ -1,6 +1,12 @@
 #!/usr/bin/env node
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+
 const BRIDGE_URL = process.env.PET_BRIDGE_URL || "http://127.0.0.1:17366/events";
 const TIMEOUT_MS = Number(process.env.PET_BRIDGE_HOOK_TIMEOUT_MS || 1200);
+const QUEUE_PATH = resolve(process.env.PET_NOTIFY_QUEUE || join(homedir(), ".codex-pet-bridge", "notify-outbox.jsonl"));
+const MAX_QUEUE = Number(process.env.PET_NOTIFY_MAX_QUEUE || 300);
 
 try {
   const input = await readStdinJson();
@@ -12,7 +18,8 @@ try {
     message: input.message || messageForHook(input)
   };
 
-  await postEvent(event);
+  const result = await postEvent(event);
+  if (!result.ok) await enqueueEvent(event, result.error);
   process.exit(0);
 } catch (error) {
   // Hooks should be observational. Never block Claude Code because the pet is offline.
@@ -31,15 +38,40 @@ async function postEvent(event) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    await fetch(BRIDGE_URL, {
+    const response = await fetch(BRIDGE_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(event),
       signal: controller.signal
     });
+    if (!response.ok) return { ok: false, error: `${response.status} ${response.statusText}` };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message || String(error) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function enqueueEvent(event, reason) {
+  let records = [];
+  try {
+    records = (await readFile(QUEUE_PATH, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    records = [];
+  }
+  records.push({
+    ...event,
+    _queuedAt: new Date().toISOString(),
+    _queueReason: String(reason || "send-failed").slice(0, 160)
+  });
+  await mkdir(dirname(QUEUE_PATH), { recursive: true });
+  const tmpPath = `${QUEUE_PATH}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  await writeFile(tmpPath, `${records.slice(-MAX_QUEUE).map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+  await rename(tmpPath, QUEUE_PATH);
 }
 
 function statusForHook(name) {

@@ -62,6 +62,6 @@ Status mapping:
 - failures become `error` with `needs_user=true`
 - notification ack becomes `clear`
 
-Use stable `source + task` values so the assistant hub can maintain one active or completed state per real task. The recommended source labels are `mbp-codex`, `mini-codex`, `win-codex`, `mbp-claude`, `mini-claude`, and `openclaw`.
+Use stable `source + task` values so the assistant hub can maintain one active or completed state per real task. Example source labels are `laptop-codex`, `hub-codex`, `win-codex`, `laptop-claude`, `hub-claude`, and `openclaw`.
 
-In the current XiaoZhi backend policy, active tasks override night screen-off mode. When all tasks complete, the backend returns to idle; during scheduled night hours idle means brightness `0`.
+In a typical XiaoZhi backend policy, active tasks override night screen-off mode. When all tasks complete, the backend returns to idle; during scheduled night hours idle means brightness `0`.

@@ -106,10 +106,10 @@ curl -sS http://127.0.0.1:17366/events \
 
 ```json
 {
-  "source": "codex",
-  "task": "mbp-codex-runtime",
+  "source": "laptop-codex",
+  "task": "laptop-codex-runtime",
   "status": "running",
-  "message": "MBP Codex task is running",
+  "message": "Laptop Codex task is running",
   "workspace": "/path/to/project",
   "sessionId": "optional-upstream-session"
 }
@@ -190,7 +190,7 @@ PET_NOTIFY_THROTTLE_MS=30000 npm run start
 
 建议先只接 `Notification`、`UserPromptSubmit`、`Stop`。它们足够表达“思考中 / 等你处理 / 已完成”，又不会把每一次工具调用都刷到屏幕上。
 
-hook 失败时会返回退出码 `0`，不会阻塞 Claude Code 本身。
+hook 失败时会返回退出码 `0`，不会阻塞 Claude Code 本身。发送失败会写入和 `pet-notify` 共用的有界 `PET_NOTIFY_QUEUE`，之后可由 `pet-notify --flush` 重试。
 
 ## Claude Desktop / MCP
 
@@ -225,9 +225,28 @@ Claude Desktop：
 
 Codex 侧保持轻量、本地、可替换。当前可行路径：
 
-- 用 Codex notify wrapper 在 turn 结束时 `POST /events`。
-- 用轻量 activity bridge 判断“运行中”状态。
+- 用 `pet-notify` 从 Codex notify wrapper 上报 turn 结束。
+- 用 `pet-agent-sync` 作为轻量 activity bridge 判断“运行中”状态。
 - 等公开扩展点稳定后，再接 Codex plugin 或 App Server adapter。
+
+`pet-notify` 带有有界磁盘队列。如果 bridge 离线，hook 会快速退出并稍后重试，不会卡住 Codex：
+
+```bash
+pet-notify \
+  --source laptop-codex \
+  --task laptop-codex-runtime \
+  --status completed \
+  --message "Codex task completed" \
+  --notify
+```
+
+`pet-agent-sync` 可以由 cron / launchd 定时运行，也可以常驻：
+
+```bash
+PET_AGENT_SYNC_PREFIX=laptop pet-agent-sync --watch
+```
+
+它会读取最近的 Codex session 活动和轻量本地进程状态。默认策略刻意保守；未来如果 Codex 提供官方 hook 或 plugin，应该优先替换成官方 adapter。
 
 运行中事件示例：
 
@@ -235,8 +254,8 @@ Codex 侧保持轻量、本地、可替换。当前可行路径：
 curl -sS http://127.0.0.1:17366/events \
   -H 'content-type: application/json' \
   -d '{
-    "source": "codex",
-    "task": "mbp-codex-runtime",
+    "source": "laptop-codex",
+    "task": "laptop-codex-runtime",
     "status": "running",
     "message": "Codex is working"
   }'
@@ -248,8 +267,8 @@ curl -sS http://127.0.0.1:17366/events \
 curl -sS http://127.0.0.1:17366/events \
   -H 'content-type: application/json' \
   -d '{
-    "source": "codex",
-    "task": "mbp-codex-runtime",
+    "source": "laptop-codex",
+    "task": "laptop-codex-runtime",
     "status": "completed",
     "message": "Codex task completed",
     "notify": true
@@ -291,8 +310,8 @@ PET_NOTIFICATION_WEBHOOK_URL=http://127.0.0.1:3000/notify npm run start
 如果 Mac mini 已经运行小智 Assistant Hub，推荐让 bridge 直接复用它的 `/assistant/notifications`，不要再给设备单独搭一套状态服务。
 
 ```bash
-XIAOZHI_ASSISTANT_URL=http://192.168.8.109:8003 \
-XIAOZHI_SOURCE_PREFIX=mbp \
+XIAOZHI_ASSISTANT_URL=http://127.0.0.1:8003 \
+XIAOZHI_SOURCE_PREFIX=laptop \
 npm run start
 ```
 
@@ -306,10 +325,10 @@ payload 形态：
 
 ```json
 {
-  "source": "mbp-codex",
-  "task": "mbp-codex-runtime",
+  "source": "laptop-codex",
+  "task": "laptop-codex-runtime",
   "status": "running",
-  "message": "MBP Codex task is running",
+  "message": "Laptop Codex task is running",
   "priority": "normal",
   "needs_user": false
 }
@@ -325,17 +344,17 @@ payload 形态：
 | `error`, `failed`, `blocked` | `error` |
 | `idle`, `clear`, `ack`, `dismissed` | `clear` |
 
-小智后端负责最终屏幕策略。当前家中部署中：有任务运行时即使处于夜间也会亮屏；Codex 是蓝紫色，Claude Code 是橙色，OpenClaw 是青绿色；任务完成时短暂高亮绿色闪烁，随后回到日间 / 夜间屏幕日程。
+小智后端负责最终屏幕策略。一个典型下游策略是：有任务运行时即使处于夜间也会亮屏；Codex 是蓝紫色；Claude Code 是橙色；OpenClaw 是青绿色；任务完成时短暂高亮绿色闪烁；空闲后回到配置好的日间 / 夜间屏幕日程。
 
 推荐 source 命名：
 
 | 机器 / 工具 | Source |
 | --- | --- |
-| MacBook Pro Codex | `mbp-codex` |
-| Mac mini Codex | `mini-codex` |
+| 笔记本 Codex | `laptop-codex` |
+| 常驻中枢 Codex | `hub-codex` |
 | Windows Codex | `win-codex` |
-| MacBook Pro Claude Code | `mbp-claude` |
-| Mac mini Claude Code | `mini-claude` |
+| 笔记本 Claude Code | `laptop-claude` |
+| 常驻中枢 Claude Code | `hub-claude` |
 | OpenClaw | `openclaw` |
 
 ## ESP32 / 小智轮询
@@ -390,7 +409,7 @@ GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 - 如果启用 `PET_BRIDGE_STORE_RAW=1`，会对常见 secret 字段做脱敏。
 - hook 是观察型；bridge 掉线不会影响上游工具继续运行。
 
-推荐多设备部署方式是 Mac mini 常驻运行 bridge，笔记本通过 SSH tunnel 发事件。详见 [Mac Mini Deployment](docs/MAC_MINI_DEPLOYMENT.md)。
+推荐多设备部署方式是 Mac mini 常驻运行 bridge，笔记本通过 SSH tunnel 发事件。详见 [Mac mini Deployment](docs/MAC_MINI_DEPLOYMENT.md)。
 
 ## 项目状态
 
@@ -401,7 +420,10 @@ GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 - HTTP 事件写入
 - SSE 实时流
 - 未读通知队列和 ack
+- 有界客户端 `pet-notify` 队列
+- 有界 bridge sink outbox
 - Claude Code command hook
+- 轻量 Codex / Claude activity sync helper
 - MCP stdio tool
 - ESP32 轮询接口
 - 小智 Assistant Hub sink
@@ -412,8 +434,7 @@ GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 - 官方 Codex plugin / App Server adapter
 - 更丰富的桌面宠物 UI 示例
 - 加密持久化通知存储
-- LaunchAgent / 安装包
-- 多设备身份命名策略
+- 安装包
 
 ## 兼容性
 
@@ -430,7 +451,7 @@ GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security](docs/SECURITY.md)
-- [Mac Mini Deployment](docs/MAC_MINI_DEPLOYMENT.md)
+- [Mac mini Deployment](docs/MAC_MINI_DEPLOYMENT.md)
 - [References](docs/REFERENCES.md)
 
 ## 验证
@@ -453,4 +474,4 @@ node ./test/smoke.js
 
 ## License
 
-[MIT](LICENSE) © 2026 Zifan and Codex Pet Bridge contributors.
+[MIT](LICENSE) © 2026 vcxzvfe and Codex Pet Bridge contributors.
