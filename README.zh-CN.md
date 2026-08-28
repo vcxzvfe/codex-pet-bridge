@@ -38,6 +38,7 @@ Codex Pet Bridge 就是这个缺失的本地通知层。
 - 把语义化任务状态转发到 Mac mini 上的小智 Assistant Hub。
 - 写入 JSONL 日志用于排查，但默认不存原始 prompt。
 - 本地优先：默认只监听 localhost；如果暴露到局域网，要求 token。
+- 支持静默时段，并且可以直接用「家里灯是不是全关了」来判断。
 
 ## 架构
 
@@ -398,6 +399,41 @@ POST http://127.0.0.1:17366/notifications/<id>/ack
 GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 ```
 
+## 静默时段
+
+一个没法说「现在别吵」的状态灯，最后只会被拔掉。静默判定放在 `pet-notify` 里，所以
+所有事件来源（hook、`pet-agent-sync`、你自己的脚本）都自动继承；被静默的事件是**直接
+丢弃而不是排队**——状态事件到了早上已经没有意义，而稍后补发只会在最不该亮的时刻点亮屏幕。
+
+整个静默功能默认关闭，需要设 `PET_QUIET_ENABLED=1` 才生效。两条互相独立的静默理由：
+
+| 规则 | 配置 | 含义 |
+|---|---|---|
+| 时钟窗口 | `PET_QUIET_START` / `PET_QUIET_END` | 无条件生效，默认 `01:00`-`09:00`。 |
+| 家里已关灯 | `PET_QUIET_LIGHTS_ENABLED=1` | 所有房间灯都关，且处于 `PET_QUIET_LIGHTS_ENVELOPE_START`-`_END`（默认 `21:00`-`11:00`）之间。 |
+
+关灯规则实时读取 Home Assistant，需要一个只读 token，默认关闭。查看当前判定：
+
+```bash
+npm run quiet
+```
+
+真实智能家居会从两个方向击穿这个判据的朴素写法，两道防御都默认开启：
+
+- **指示灯。** 智能插座和传感器会把自己的状态 LED 暴露成 `light.*` 实体，并且常年亮着。
+  不排除掉，「所有灯都关」就永远不成立，整条规则会静默失效。
+  `PET_QUIET_LIGHTS_EXCLUDE_SUFFIXES` 默认为 `_indicator_light`，按自己的集成补充。
+- **状态恢复不等于人的意图。** 集成重连时会重新发布上一次的已知状态，于是屋里没人灯却
+  「亮了」。一处实测：Xiaomi Home 集成每天 04:30 固定重连，主灯会报 `on` 约 6 秒，灯带
+  则报 `on` 长达半小时。因此新出现的 `on` 必须稳定持续 `PET_QUIET_LIGHTS_MIN_ON_SECONDS`
+  秒（默认 90）才算数；已知的重连时刻可以写进 `PET_QUIET_LIGHTS_HOLD_WINDOWS`
+  （例如 `04:25-05:05`），在这段时间沿用上一次的判定。`unavailable` 与 `unknown` 一律按关处理。
+
+如果在 envelope 内连不上 Home Assistant，判定会**向静默侧失败**：夜里状态未知就保持
+熄灭，而不是把人吵醒（设 `PET_QUIET_LIGHTS_FAIL_CLOSED=0` 可反转）。
+
+真正的告警可以用 `pet-notify --ignore-quiet` 绕过。
+
 ## 安全模型
 
 这个项目面向可信本机和家庭局域网，不应该直接暴露到公网。
@@ -457,7 +493,8 @@ GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 ## 验证
 
 ```bash
-npm run smoke
+npm run smoke        # quiet-gate assertions + the bridge smoke test
+npm run test:quiet   # quiet gate only
 ```
 
 或：

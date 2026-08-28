@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { quietNow } from "./quiet-gate.js";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -20,6 +21,7 @@ if (args.help) {
 }
 
 if (args.flush) {
+  if ((await quietNow()).quiet) process.exit(0);
   await flushQueue(bridgeUrl, queuePath);
   process.exit(0);
 }
@@ -53,6 +55,17 @@ if (args["dry-run"]) {
   process.exit(0);
 }
 
+// Quiet hours drop the event instead of queueing it. A queued status event
+// is worthless by morning, and flushing it later would light the screen at
+// exactly the wrong moment.
+const quiet = await quietNow();
+if (quiet.quiet && !args["ignore-quiet"]) {
+  if (process.env.PET_NOTIFY_LOG_SUPPRESSED === "1") {
+    console.error(`pet-notify suppressed (${quiet.reason}): ${event.source} ${event.status}`);
+  }
+  process.exit(0);
+}
+
 await flushQueue(bridgeUrl, queuePath);
 const result = await sendEvent(bridgeUrl, event);
 if (!result.ok) {
@@ -65,7 +78,7 @@ function parseArgs(values) {
     const value = values[index];
     if (!value.startsWith("--")) continue;
     const key = value.slice(2);
-    if (["flush", "notify", "no-notify", "dry-run", "help"].includes(key)) {
+    if (["flush", "notify", "no-notify", "dry-run", "help", "ignore-quiet"].includes(key)) {
       output[key] = true;
       continue;
     }
@@ -190,5 +203,6 @@ Options:
   --queue <path>           Defaults to ~/.codex-pet-bridge/notify-outbox.jsonl.
   --flush                  Retry queued events and exit.
   --dry-run                Print the event without sending.
+  --ignore-quiet           Send even during quiet hours (use for real alerts).
 `);
 }

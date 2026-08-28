@@ -1,6 +1,6 @@
 {
   "name": "codex-pet-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local-first bridge that turns AI agent status into pet-friendly events for desktop pets and XiaoZhi devices.",
   "type": "module",
   "keywords": [
@@ -16,7 +16,10 @@
     "sse",
     "server-sent-events",
     "ai-agent",
-    "notification-bridge"
+    "notification-bridge",
+    "quiet-hours",
+    "home-assistant",
+    "do-not-disturb"
   ],
   "homepage": "https://github.com/vcxzvfe/codex-pet-bridge#readme",
   "bugs": {
@@ -31,7 +34,8 @@
     "pet-claude-hook": "./src/claude-hook.js",
     "pet-mcp-server": "./src/mcp-server.js",
     "pet-notify": "./src/notify-client.js",
-    "pet-agent-sync": "./src/agent-sync.js"
+    "pet-agent-sync": "./src/agent-sync.js",
+    "pet-quiet-gate": "./src/quiet-gate.js"
   },
   "scripts": {
     "start": "node ./src/bridge-server.js",
@@ -39,7 +43,9 @@
     "mcp": "node ./src/mcp-server.js",
     "notify": "node ./src/notify-client.js",
     "sync:tick": "node ./src/agent-sync.js --tick",
-    "smoke": "node ./test/smoke.js"
+    "smoke": "node ./test/quiet-gate.test.js && node ./test/smoke.js",
+    "quiet": "node ./src/quiet-gate.js",
+    "test:quiet": "node ./test/quiet-gate.test.js"
   },
   "engines": {
     "node": ">=20"

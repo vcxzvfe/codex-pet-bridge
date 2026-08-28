@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,8 +9,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const NOTIFY_CLIENT = resolve(HERE, "notify-client.js");
 const STATE_PATH = resolve(process.env.PET_AGENT_SYNC_STATE || join(homedir(), ".codex-pet-bridge", "agent-sync-state.json"));
 const CODEX_SESSIONS_DIR = resolve(process.env.CODEX_SESSIONS_DIR || join(homedir(), ".codex", "sessions"));
+const CLAUDE_TURN_PATH = resolve(process.env.PET_CLAUDE_TURN_STATE || join(homedir(), ".codex-pet-bridge", "claude-turn.json"));
 const SOURCE_PREFIX = process.env.PET_AGENT_SYNC_PREFIX || "local";
 const ACTIVE_WINDOW_MS = numberFromEnv("PET_AGENT_SYNC_ACTIVE_WINDOW_MS", 45000);
+const TAIL_BYTES = numberFromEnv("PET_AGENT_SYNC_TAIL_BYTES", 512 * 1024);
+const CLAUDE_TURN_MAX_AGE_MS = numberFromEnv("PET_AGENT_SYNC_CLAUDE_TURN_MAX_AGE_MS", 900000);
+const TURN_START_TYPES = new Set(["task_started", "user_message"]);
+const TURN_END_TYPES = new Set(["task_complete", "turn_complete", "turn_aborted", "error", "shutdown_complete"]);
 const REFRESH_MS = numberFromEnv("PET_AGENT_SYNC_REFRESH_MS", 90000);
 const WATCH_INTERVAL_MS = numberFromEnv("PET_AGENT_SYNC_INTERVAL_MS", 15000);
 
@@ -39,7 +44,7 @@ async function tick() {
   });
   await updateChannel(state, {
     key: "claude",
-    active: claudeActive(),
+    active: await claudeActive(),
     source: `${SOURCE_PREFIX}-claude`,
     task: `${SOURCE_PREFIX}-claude-session`,
     runningMessage: `${SOURCE_PREFIX} Claude Code is working`,
@@ -92,18 +97,44 @@ async function codexActive() {
   return (await codexSessionActive()) || codexCliActive();
 }
 
+/**
+ * A rollout counts as active only when its newest turn boundary is a start.
+ *
+ * Reading just the last line does not work: Codex writes token_count,
+ * sub-agent activity, and inter-agent metadata *after* task_complete, and the
+ * desktop app keeps one rollout open for hours, so the last line is almost
+ * never the completion record and every session read as permanently running.
+ * A turn whose start has scrolled out of the tail window reads as closed,
+ * which is the safe direction: a missed indicator beats one that never stops.
+ */
 async function codexSessionActive() {
   const now = Date.now();
   const files = listRecentJsonl(CODEX_SESSIONS_DIR, 12);
   for (const path of files) {
-    const age = now - path.mtimeMs;
-    if (age > ACTIVE_WINDOW_MS) continue;
-    const payload = await lastJsonPayload(path.path);
-    if (!payload) continue;
-    if (payload.completed_at || ["completed", "turn_complete"].includes(payload.reason)) continue;
-    return true;
+    if (now - path.mtimeMs > ACTIVE_WINDOW_MS) continue;
+    if (await sessionTurnOpen(path.path)) return true;
   }
   return false;
+}
+
+async function sessionTurnOpen(path) {
+  let lastStart = -1;
+  let lastEnd = -1;
+  const lines = await tailLines(path, TAIL_BYTES);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.includes("task_") && !line.includes("turn_") && !line.includes("user_message")) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const kind = record.payload?.type || record.type;
+    if (TURN_START_TYPES.has(kind)) lastStart = index;
+    else if (TURN_END_TYPES.has(kind)) lastEnd = index;
+  }
+  return lastStart > lastEnd;
 }
 
 function codexCliActive() {
@@ -117,8 +148,28 @@ function codexCliActive() {
   return false;
 }
 
-function claudeActive() {
-  if (process.env.PET_AGENT_SYNC_CLAUDE_PROCESS_SCAN === "0") return false;
+/**
+ * Claude Code activity comes from the hooks, not from process CPU.
+ *
+ * `ps` %cpu is a decaying average, so an app that was busy a minute ago still
+ * reports over 1%, and a Claude turn is mostly network wait anyway. The
+ * UserPromptSubmit/Stop hooks bracket a turn exactly; claude-hook.js writes
+ * that boundary to a small state file and this reads it. Stale open turns
+ * (crash, Ctrl+C) expire so nothing gets stuck "running".
+ */
+async function claudeActive() {
+  if (process.env.PET_AGENT_SYNC_CLAUDE_PROCESS_SCAN === "1") return claudeProcessBusy();
+  try {
+    const turn = JSON.parse(await readFile(CLAUDE_TURN_PATH, "utf8"));
+    if (turn.state !== "running") return false;
+    return Date.now() - Number(turn.ts || 0) <= CLAUDE_TURN_MAX_AGE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** Opt-in legacy heuristic, for setups without Claude Code hooks. */
+function claudeProcessBusy() {
   for (const proc of listProcesses()) {
     if (proc.pid === process.pid) continue;
     const command = proc.command.toLowerCase();
@@ -179,22 +230,21 @@ function listRecentJsonl(root, limit) {
   }
 }
 
-async function lastJsonPayload(path) {
+/** Read the tail of a rollout without loading a multi-hundred-MB file. */
+async function tailLines(path, limitBytes) {
   try {
-    const text = await readFile(path, "utf8");
-    const lines = text.split("\n").filter(Boolean).slice(-80);
-    let payload = null;
-    for (const line of lines) {
-      try {
-        const record = JSON.parse(line);
-        payload = record.payload || record;
-      } catch {
-        // Ignore malformed partial lines.
-      }
+    const handle = await open(path, "r");
+    try {
+      const { size } = await handle.stat();
+      const start = Math.max(0, size - limitBytes);
+      const buffer = Buffer.alloc(size - start);
+      await handle.read(buffer, 0, buffer.length, start);
+      return buffer.toString("utf8").split("\n").filter(Boolean);
+    } finally {
+      await handle.close();
     }
-    return payload;
   } catch {
-    return null;
+    return [];
   }
 }
 

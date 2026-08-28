@@ -44,6 +44,44 @@ Adapters should stay thin:
 
 This keeps future upstream updates local to one adapter instead of touching the notification devices.
 
+## Activity Detection
+
+`pet-agent-sync` answers one question per agent: is a turn open right now? Both
+answers used to be inferred from side effects, and both were wrong in the same
+direction, reporting "running" forever.
+
+**Codex.** A rollout is active when its newest turn boundary is a start
+(`task_started`, `user_message`) rather than an end (`task_complete`,
+`turn_complete`, `turn_aborted`, `error`, `shutdown_complete`). Inspecting only the
+last record does not work: Codex appends `token_count`, sub-agent activity, and
+inter-agent metadata *after* the completion record, and the desktop app keeps one
+rollout open for hours, so the final line is almost never `task_complete`. The tail
+window is 512KB because a single reasoning payload can be tens of kilobytes; a turn
+whose start has scrolled out reads as closed, which is the safe way to be wrong.
+
+**Claude Code.** Taken from the hooks, not from `ps`. `UserPromptSubmit` and `Stop`
+bracket a turn exactly, and `claude-hook.js` records that boundary to
+`PET_CLAUDE_TURN_STATE`. Process CPU cannot answer this: `%cpu` is a decaying
+average, so a process that was busy a minute ago still reports over 1%, and a turn
+is mostly network wait regardless. `SessionEnd` and a max-age guard close turns that
+end without `Stop`.
+
+**One owner per task id.** Two daemons publishing the same task with different
+heuristics will flap: one sends `running` while the other sends `done`, and `done`
+carries needs-user, which is the brightest state a screen has. `pet-agent-sync` owns
+both channels; nothing else should publish those task ids.
+
+## Quiet Gate
+
+The gate lives in `notify-client.js`, so every producer inherits it, and suppressed
+events are dropped rather than queued. See the README for configuration. Two design
+notes worth keeping:
+
+- Failure inside the night envelope resolves to *quiet*. A monitoring system that
+  wakes someone when it loses its data source gets switched off.
+- Optional Home Assistant integration is read-only: the gate queries `/api/states`
+  and never calls a service.
+
 ## XiaoZhi Sink
 
 When `XIAOZHI_ASSISTANT_URL` is set, the bridge forwards normalized semantic events to the Mac mini assistant hub:
