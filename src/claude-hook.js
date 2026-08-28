@@ -7,6 +7,16 @@ const BRIDGE_URL = process.env.PET_BRIDGE_URL || "http://127.0.0.1:17366/events"
 const TIMEOUT_MS = Number(process.env.PET_BRIDGE_HOOK_TIMEOUT_MS || 1200);
 const QUEUE_PATH = resolve(process.env.PET_NOTIFY_QUEUE || join(homedir(), ".codex-pet-bridge", "notify-outbox.jsonl"));
 const MAX_QUEUE = Number(process.env.PET_NOTIFY_MAX_QUEUE || 300);
+const TURN_STATE_PATH = resolve(process.env.PET_CLAUDE_TURN_STATE || join(homedir(), ".codex-pet-bridge", "claude-turn.json"));
+
+// UserPromptSubmit and Stop bracket a Claude Code turn exactly. Recording that
+// boundary here is what lets agent-sync stop guessing "is Claude busy?" from
+// process CPU, which a decaying ps average can never answer honestly.
+const TURN_STATE_FOR_HOOK = {
+  UserPromptSubmit: "running",
+  Stop: "idle",
+  SessionEnd: "idle"
+};
 
 try {
   const input = await readStdinJson();
@@ -17,6 +27,8 @@ try {
     status: input.status || statusForHook(input.hook_event_name),
     message: input.message || messageForHook(input)
   };
+
+  await recordTurnState(input.hook_event_name);
 
   const result = await postEvent(event);
   if (!result.ok) await enqueueEvent(event, result.error);
@@ -32,6 +44,19 @@ async function readStdinJson() {
   for await (const chunk of process.stdin) chunks.push(chunk);
   const text = Buffer.concat(chunks).toString("utf8").trim();
   return text ? JSON.parse(text) : {};
+}
+
+async function recordTurnState(hookName) {
+  const state = TURN_STATE_FOR_HOOK[hookName];
+  if (!state) return;
+  try {
+    await mkdir(dirname(TURN_STATE_PATH), { recursive: true });
+    const tmpPath = `${TURN_STATE_PATH}.${process.pid}.tmp`;
+    await writeFile(tmpPath, JSON.stringify({ state, ts: Date.now() }), "utf8");
+    await rename(tmpPath, TURN_STATE_PATH);
+  } catch {
+    // Observational only: never block the hook.
+  }
 }
 
 async function postEvent(event) {

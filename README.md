@@ -38,6 +38,7 @@ Codex Pet Bridge is a local notification hub for that missing layer.
 - Forwards semantic status events to the XiaoZhi Assistant Hub on a Mac mini.
 - Writes JSONL logs for debugging without storing raw prompts by default.
 - Stays local-first: localhost by default, token-protected if exposed to a LAN.
+- Honours quiet hours, optionally driven by whether the home's lights are actually off.
 
 ## Architecture
 
@@ -188,7 +189,16 @@ Add `pet-claude-hook` as an observational hook in user-level `~/.claude/settings
 }
 ```
 
-Recommended starter events are `Notification`, `UserPromptSubmit`, and `Stop`. They are enough for "thinking / waiting for you / completed" without flooding the pet or XiaoZhi screen with every tool call.
+Recommended starter events are `Notification`, `UserPromptSubmit`, `Stop`, and
+`SessionEnd`. They are enough for "thinking / waiting for you / completed" without
+flooding the pet or XiaoZhi screen with every tool call.
+
+`UserPromptSubmit` and `Stop` also bracket a turn exactly, and the hook records that
+boundary to `PET_CLAUDE_TURN_STATE`. `pet-agent-sync` reads it instead of guessing
+from process CPU: `ps` reports a *decaying average*, so an app that was busy a minute
+ago still looks busy, and a Claude turn is mostly network wait anyway. Add
+`SessionEnd` so a session that dies without `Stop` cannot leave a turn open forever
+(a stale turn also expires after `PET_AGENT_SYNC_CLAUDE_TURN_MAX_AGE_MS`).
 
 Hook failures exit with code `0`; Claude Code should never be blocked because the pet bridge is offline. Failed sends are written to the same bounded `PET_NOTIFY_QUEUE` used by `pet-notify`, and `pet-notify --flush` retries them later.
 
@@ -398,6 +408,50 @@ If the device can only send GET:
 GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 ```
 
+## Quiet Hours
+
+A status light that cannot be told "not now" becomes a status light you unplug. The
+quiet gate lives in `pet-notify`, so every producer (hooks, `pet-agent-sync`, your
+own scripts) inherits it, and suppressed events are **dropped rather than queued** —
+a queued status event is worthless by morning, and flushing it later would light the
+screen at exactly the wrong moment.
+
+The gate is off until you set `PET_QUIET_ENABLED=1`. Two independent reasons to stay dark:
+
+| Rule | Config | Meaning |
+|---|---|---|
+| Clock window | `PET_QUIET_START` / `PET_QUIET_END` | Unconditional. Default `01:00`-`09:00` in `PET_QUIET_TZ`. |
+| Home is dark | `PET_QUIET_LIGHTS_ENABLED=1` | Every room light is off, within `PET_QUIET_LIGHTS_ENVELOPE_START`-`_END` (default `21:00`-`11:00`). |
+
+The lights rule reads Home Assistant live and needs a read-only token. It is off by
+default. Inspect the current verdict with:
+
+```bash
+npm run quiet
+```
+
+Real smart homes break the naive version of this check in two ways, and both
+defences are on by default:
+
+- **Backlights.** Smart plugs and sensors expose their status LED as a `light.*`
+  entity that is on around the clock. Left in the set, "all lights off" is never
+  true and the whole rule silently does nothing. `PET_QUIET_LIGHTS_EXCLUDE_SUFFIXES`
+  defaults to `_indicator_light`; add whatever your integrations use.
+- **State restore is not intent.** When an integration reconnects it republishes the
+  last known state, so lights "turn on" with nobody in the room. Measured on one
+  flat: the Xiaomi Home integration reconnects at 04:30 every single night, and the
+  ceiling light reads `on` for 6 seconds while a light strip reads `on` for half an
+  hour. So a fresh `on` is ignored until it has held for
+  `PET_QUIET_LIGHTS_MIN_ON_SECONDS` (default 90), and known reconnect times can be
+  listed in `PET_QUIET_LIGHTS_HOLD_WINDOWS` (e.g. `04:25-05:05`) to hold the previous
+  verdict across the burst. `unavailable` and `unknown` count as off.
+
+If Home Assistant cannot be reached inside the envelope, the gate fails **closed**:
+unknown state at night means stay dark rather than wake someone
+(`PET_QUIET_LIGHTS_FAIL_CLOSED=0` to invert).
+
+A genuine alert can opt out with `pet-notify --ignore-quiet`.
+
 ## Security Model
 
 This is meant for trusted local machines and home-lab networks, not the public internet.
@@ -457,7 +511,8 @@ Experimental or deployment-specific:
 ## Validation
 
 ```bash
-npm run smoke
+npm run smoke        # quiet-gate assertions + the bridge smoke test
+npm run test:quiet   # quiet gate only
 ```
 
 or:
